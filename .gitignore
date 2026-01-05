@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+bun.lockb
+
+# Environment
+.env
+.env.local
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Build output
+dist/
+web/dist/
+
+# Worktrees (managed separately)
+worktrees/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
