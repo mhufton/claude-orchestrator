@@ -16,8 +16,8 @@ bun.lockb
 dist/
 web/dist/
 
-# Worktrees (managed separately)
-worktrees/
+# Worktrees data (managed separately, top-level only)
+/worktrees/
 
 # IDE
 .idea/
