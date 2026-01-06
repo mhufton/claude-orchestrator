@@ -7,6 +7,7 @@ import { initWorktreeManager } from './worktrees/manager';
 import { stopAllAgents, loadTodosFromDatabase } from './agents/spawner';
 import { startStaleAgentDetector } from './agents/stale-detector';
 import { initAutoPlay, stopAutoPlay } from './autoplay/loop';
+import { startStatusBroadcast, stopStatusBroadcast } from './poll-status';
 import {
   addClient,
   removeClient,
@@ -52,6 +53,10 @@ console.log(`Issue sync started (every ${config.intervals.issueSync / 1000}s)`);
 // Start PR watcher
 startPRWatchLoop(config.intervals.prWatch);
 console.log(`PR watcher started (every ${config.intervals.prWatch / 1000}s)`);
+
+// Start poll status broadcast (for UI countdowns)
+startStatusBroadcast();
+console.log('Poll status broadcast started');
 
 // Start stale agent detector - checks every 30s, auto-respawns dead agents immediately
 startStaleAgentDetector();
@@ -152,6 +157,10 @@ process.on('SIGINT', async () => {
   stopAutoPlay();
   console.log('Auto-play stopped');
 
+  // Stop status broadcast
+  stopStatusBroadcast();
+  console.log('Status broadcast stopped');
+
   // Stop all running agents
   stopAllAgents();
   console.log('Agents stopped');
@@ -166,6 +175,7 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   console.log('\nShutting down...');
   stopAutoPlay();
+  stopStatusBroadcast();
   stopAllAgents();
   server.stop();
   process.exit(0);

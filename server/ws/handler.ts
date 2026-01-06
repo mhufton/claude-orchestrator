@@ -10,6 +10,7 @@ import { getAllTicketTodos, stopAgent, spawnAgent, isAgentRunning } from '../age
 import { runBatchReview } from '../agents/reviewer';
 import { startAutoPlay, stopAutoPlay, isAutoPlayActive } from '../autoplay/loop';
 import { getWorktreePath } from '../worktrees/manager';
+import { getPollStatus, getActivityLog } from '../poll-status';
 import type { Ticket, WorktreeSlot, TicketState } from '../state/types';
 
 // Track connected clients
@@ -967,6 +968,10 @@ export function sendInitialState(ws: ServerWebSocket<unknown>, config: { owner: 
   // Get orchestrator settings
   const settings = db.getSettings();
 
+  // Get poll status and activity log
+  const pollStatus = getPollStatus();
+  const activityLog = getActivityLog();
+
   sendToClient(ws, {
     type: 'init',
     tickets: tickets.map(t => ({
@@ -991,7 +996,9 @@ export function sendInitialState(ws: ServerWebSocket<unknown>, config: { owner: 
       active: isAutoPlayActive(),
       intervalMs: settings.autoPlayIntervalMs
     },
-    settings
+    settings,
+    pollStatus,
+    activityLog
   });
 }
 

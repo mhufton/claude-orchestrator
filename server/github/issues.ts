@@ -1,6 +1,7 @@
 import * as github from './client';
 import * as db from '../db';
 import { broadcastTicketCreated, broadcastTicketUpdated, broadcast } from '../ws/handler';
+import { recordIssueSyncStart, addActivity, setIssueSyncInterval } from '../poll-status';
 
 const CLAUDE_REVIEW_LABEL = 'claude-review';
 
@@ -171,19 +172,27 @@ export async function syncIssues(readyLabel: string): Promise<{ added: number; u
 }
 
 export function startIssueSyncLoop(label: string, intervalMs: number): void {
+  setIssueSyncInterval(intervalMs);
+
   // Initial sync
+  recordIssueSyncStart();
   syncIssues(label).then(({ added, updated, removed }) => {
     console.log(`Initial sync complete: ${added} added, ${updated} updated, ${removed} removed`);
+    if (added > 0) {
+      addActivity('issue_sync', `Synced ${added} new issue(s) from GitHub`);
+    }
   }).catch(err => {
     console.error('Initial issue sync failed:', err);
   });
 
   // Periodic sync
   setInterval(async () => {
+    recordIssueSyncStart();
     try {
       const { added, updated, removed } = await syncIssues(label);
       if (added > 0 || updated > 0 || removed > 0) {
         console.log(`Issue sync: ${added} added, ${updated} updated, ${removed} removed`);
+        addActivity('issue_sync', `Synced: ${added} new, ${updated} updated, ${removed} removed`);
       }
     } catch (err) {
       console.error('Issue sync failed:', err);

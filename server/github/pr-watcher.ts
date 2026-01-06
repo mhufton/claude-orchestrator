@@ -4,6 +4,7 @@ import { parseReviewScore, getReviewFeedback } from './score-parser';
 import { broadcastTicketUpdated, broadcastSlotStatus, broadcastChatMessagesDelivered } from '../ws/handler';
 import { spawnAgent } from '../agents/spawner';
 import { acquireSlot } from '../worktrees/pool';
+import { recordPRWatchStart, recordPRWatchComplete, addActivity, setPRWatchInterval } from '../poll-status';
 import type { Ticket } from '../state/types';
 
 const SCORE_THRESHOLD = 90;
@@ -414,15 +415,28 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
 }
 
 export function startPRWatchLoop(intervalMs: number): void {
+  setPRWatchInterval(intervalMs);
+
   setInterval(async () => {
+    recordPRWatchStart();
+
     // Check tickets in 'in_review' state
     const inReviewTickets = db.getTicketsByState('in_review');
+    let ticketsChecked = 0;
 
     for (const ticket of inReviewTickets) {
       const result = await watchTicketPR(ticket);
+      ticketsChecked++;
 
       if (result.action !== 'waiting') {
         console.log(`Ticket #${ticket.github_issue_number}: ${result.action} - ${result.reason}`);
+
+        // Log activity based on result
+        if (result.action === 'completed') {
+          addActivity('pr_merged', `PR #${ticket.pr_number} merged for issue #${ticket.github_issue_number}`);
+        } else if (result.action === 'respawned') {
+          addActivity('respawn', `Respawned agent for #${ticket.github_issue_number}: ${result.reason}`);
+        }
       }
     }
 
@@ -470,7 +484,10 @@ export function startPRWatchLoop(intervalMs: number): void {
           console.warn(`[pr-watcher] Error checking for unlinked PRs for ticket #${ticket.github_issue_number}:`, error);
         }
       }
+      ticketsChecked++;
     }
+
+    recordPRWatchComplete(ticketsChecked);
   }, intervalMs);
 }
 

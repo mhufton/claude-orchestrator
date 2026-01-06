@@ -100,7 +100,7 @@ ${problems.join('\n')}
     : '';
 
   // If there's review feedback, include it as "here's what the reviewer found"
-  const reviewFindingsSection = (context.reviewFeedback && context.previousScore !== null && context.previousScore < 90)
+  const reviewFindingsSection = (context.reviewFeedback && context.previousScore !== null && context.previousScore !== undefined && context.previousScore < 90)
     ? `## Reviewer findings:
 ${context.reviewFeedback}
 

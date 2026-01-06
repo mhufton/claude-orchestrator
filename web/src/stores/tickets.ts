@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Ticket, WorktreeSlot, Config, AgentEvent, AgentTodo, ChatMessage, ServerMessage } from '../lib/types';
+import type { Ticket, WorktreeSlot, Config, AgentEvent, AgentTodo, ChatMessage, ServerMessage, PollStatus, ActivityEntry } from '../lib/types';
 
 interface PipelineStatus {
   paused: boolean;
@@ -54,10 +54,14 @@ interface TicketsState {
   reviewProgress: ReviewProgress;
   pipelineStatus: PipelineStatus;
   autoplayStatus: AutoplayStatus;
+  pollStatus: PollStatus;
+  activityLog: ActivityEntry[];
 
   // Actions
   setConnected: (connected: boolean) => void;
-  setInitialState: (tickets: Ticket[], slots: WorktreeSlot[], config: Config, agentLogs?: Record<number, AgentEvent[]>, agentTodos?: Record<number, AgentTodo[]>, pipelineStatus?: PipelineStatus, settings?: OrchestratorSettings, autoplayStatus?: AutoplayStatus) => void;
+  setInitialState: (tickets: Ticket[], slots: WorktreeSlot[], config: Config, agentLogs?: Record<number, AgentEvent[]>, agentTodos?: Record<number, AgentTodo[]>, pipelineStatus?: PipelineStatus, settings?: OrchestratorSettings, autoplayStatus?: AutoplayStatus, pollStatus?: PollStatus, activityLog?: ActivityEntry[]) => void;
+  setPollStatus: (status: PollStatus) => void;
+  addActivity: (activity: ActivityEntry) => void;
   setPipelineStatus: (status: PipelineStatus) => void;
   setAutoplayStatus: (status: AutoplayStatus) => void;
   setSettings: (settings: OrchestratorSettings) => void;
@@ -114,14 +118,25 @@ export const useTicketsStore = create<TicketsState>((set, get) => ({
   },
   pipelineStatus: { paused: false, reason: '', pausedAt: '' },
   autoplayStatus: { enabled: false, active: false, intervalMs: 30000 },
+  pollStatus: {
+    prWatch: { lastRun: null, nextRun: null, intervalMs: 120000, ticketsChecked: 0 },
+    issueSync: { lastRun: null, nextRun: null, intervalMs: 60000 }
+  },
+  activityLog: [],
 
   setConnected: (connected) => set({ connected }),
+
+  setPollStatus: (status) => set({ pollStatus: status }),
+
+  addActivity: (activity) => set((state) => ({
+    activityLog: [activity, ...state.activityLog].slice(0, 50) // Keep last 50
+  })),
 
   setPipelineStatus: (status) => set({ pipelineStatus: status }),
 
   setAutoplayStatus: (status) => set({ autoplayStatus: status }),
 
-  setInitialState: (tickets, slots, config, agentLogs, agentTodos, pipelineStatus, settings, autoplayStatus) => set({
+  setInitialState: (tickets, slots, config, agentLogs, agentTodos, pipelineStatus, settings, autoplayStatus, pollStatus, activityLog) => set({
     tickets,  // Replace all tickets on init
     slots,
     config,
@@ -133,7 +148,12 @@ export const useTicketsStore = create<TicketsState>((set, get) => ({
       : new Map(),
     pipelineStatus: pipelineStatus || { paused: false, reason: '', pausedAt: '' },
     autoplayStatus: autoplayStatus || { enabled: false, active: false, intervalMs: 30000 },
-    settings: settings || { maxAgentSlots: 3, maxParallelReviews: 3, autoPlayEnabled: false, autoPlayIntervalMs: 30000 }
+    settings: settings || { maxAgentSlots: 3, maxParallelReviews: 3, autoPlayEnabled: false, autoPlayIntervalMs: 30000 },
+    pollStatus: pollStatus || {
+      prWatch: { lastRun: null, nextRun: null, intervalMs: 120000, ticketsChecked: 0 },
+      issueSync: { lastRun: null, nextRun: null, intervalMs: 60000 }
+    },
+    activityLog: activityLog || []
   }),
 
   setSettings: (settings) => set({ settings }),
@@ -280,8 +300,21 @@ export function handleServerMessage(message: ServerMessage): void {
         message.agentTodos,
         message.pipelineStatus,
         message.settings as unknown as OrchestratorSettings | undefined,
-        message.autoplayStatus
+        message.autoplayStatus,
+        message.pollStatus,
+        message.activityLog
       );
+      break;
+
+    case 'poll_status':
+      store.setPollStatus({
+        prWatch: message.prWatch,
+        issueSync: message.issueSync
+      });
+      break;
+
+    case 'activity':
+      store.addActivity(message.activity);
       break;
 
     case 'settings_updated':

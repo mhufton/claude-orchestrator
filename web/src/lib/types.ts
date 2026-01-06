@@ -93,7 +93,7 @@ export interface Config {
 
 // WebSocket Messages
 export type ServerMessage =
-  | { type: 'init'; tickets: Ticket[]; config: Config; slots: WorktreeSlot[]; agentLogs?: Record<number, AgentEvent[]>; agentTodos?: Record<number, AgentTodo[]>; pipelineStatus?: { paused: boolean; reason: string; pausedAt: string }; settings?: Record<string, unknown>; autoplayStatus?: { enabled: boolean; active: boolean; intervalMs: number } }
+  | { type: 'init'; tickets: Ticket[]; config: Config; slots: WorktreeSlot[]; agentLogs?: Record<number, AgentEvent[]>; agentTodos?: Record<number, AgentTodo[]>; pipelineStatus?: { paused: boolean; reason: string; pausedAt: string }; settings?: Record<string, unknown>; autoplayStatus?: { enabled: boolean; active: boolean; intervalMs: number }; pollStatus?: PollStatus; activityLog?: ActivityEntry[] }
   | { type: 'ticket_created'; ticket: Ticket }
   | { type: 'ticket_updated'; ticketId: number; changes: Partial<Ticket> }
   | { type: 'ticket_started'; ticketId: number; slot: number }
@@ -114,6 +114,8 @@ export type ServerMessage =
   | { type: 'autoplay_enabled' }
   | { type: 'autoplay_disabled' }
   | { type: 'autoplay_status'; enabled: boolean; active: boolean; intervalMs: number }
+  | { type: 'poll_status'; prWatch: PollStatus['prWatch']; issueSync: PollStatus['issueSync'] }
+  | { type: 'activity'; activity: ActivityEntry }
   | { type: 'review_started'; ticketIds: number[] }
   | { type: 'review_completed'; results: unknown }
   | { type: 'review_error'; message: string }
@@ -186,4 +188,26 @@ export interface ChatMessage {
   content: string;
   pending: boolean;
   created_at: string;
+}
+
+// Poll status for showing countdowns
+export interface PollStatus {
+  prWatch: {
+    lastRun: number | null;
+    nextRun: number | null;
+    intervalMs: number;
+    ticketsChecked: number;
+  };
+  issueSync: {
+    lastRun: number | null;
+    nextRun: number | null;
+    intervalMs: number;
+  };
+}
+
+// Activity log entry
+export interface ActivityEntry {
+  timestamp: number;
+  type: 'pr_check' | 'issue_sync' | 'agent_spawn' | 'pr_merged' | 'ci_status' | 'respawn';
+  message: string;
 }
