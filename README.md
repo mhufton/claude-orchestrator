@@ -41,6 +41,7 @@ A system for managing autonomous Claude AI agents that work on GitHub issues. Po
 - Git with worktree support
 - [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - GitHub Personal Access Token with repo access
+- **Claude PR Review** configured in your target repository (see below)
 
 ## Quick Start
 
@@ -206,6 +207,101 @@ claude-orchestrator/
 ### Worktrees
 
 The orchestrator uses 3 parallel git worktrees for concurrent agent execution. These are created automatically in the `WORKTREE_DIR` directory.
+
+## Claude PR Review Setup (Required)
+
+The orchestrator relies on automated PR reviews to determine when work is complete. You must configure Claude to review PRs in your target repository.
+
+### How It Works
+
+1. Agent creates a PR
+2. **Claude reviews the PR** and posts a comment with a score (0-100)
+3. Orchestrator parses the score from the review comment
+4. If score >= 90 and CI passes → auto-merge
+5. If score < 90 → respawn agent with review feedback
+
+### Setting Up PR Reviews
+
+You need to configure a GitHub Action or similar CI step that runs Claude to review PRs. The review comment **must** include a score in this format:
+
+```
+Score: 85/100
+```
+
+Or:
+```
+**Score:** 92/100
+```
+
+### Example GitHub Action
+
+Create `.github/workflows/claude-review.yml` in your target repository:
+
+```yaml
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Claude CLI
+        run: |
+          # Install Claude CLI (adjust based on your setup)
+          npm install -g @anthropic-ai/claude-code
+
+      - name: Review PR
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the diff
+          git diff origin/${{ github.base_ref }}...HEAD > /tmp/diff.txt
+
+          # Run Claude review
+          claude --print "Review this PR diff and provide:
+          1. A score out of 100 based on code quality, test coverage, and correctness
+          2. Key issues to fix (if any)
+          3. The score should be >= 90 if the code is production-ready
+
+          Format your response with:
+          Score: XX/100
+
+          Then list any issues.
+
+          Diff:
+          $(cat /tmp/diff.txt)" > /tmp/review.txt
+
+          # Post review as PR comment
+          gh pr comment ${{ github.event.pull_request.number }} --body "$(cat /tmp/review.txt)"
+```
+
+### Review Score Threshold
+
+The orchestrator uses a **90/100** threshold:
+
+| Score | Action |
+|-------|--------|
+| >= 90 | Auto-merge if CI passes |
+| < 90 | Respawn agent with feedback |
+
+The agent receives the review feedback and is instructed to fix the issues before pushing again.
+
+### What Claude Should Review
+
+Configure your review prompt to check:
+- **Tests pass** - Most important, biggest point deduction if failing
+- **Code quality** - Clean, readable, follows project conventions
+- **No regressions** - Existing functionality isn't broken
+- **Security** - No obvious vulnerabilities
+- **Scope** - Changes match the issue being fixed
 
 ## Database
 
