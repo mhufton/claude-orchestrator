@@ -18,7 +18,7 @@ const pollStatus: PollStatus = {
   prWatch: {
     lastRun: null,
     nextRun: null,
-    intervalMs: 120000,
+    intervalMs: 30000,  // Default 30s, updated by startPRWatchLoop
     ticketsChecked: 0
   },
   issueSync: {
