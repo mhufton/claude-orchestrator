@@ -44,7 +44,8 @@ ${ticket.body || 'No description provided.'}
 1. **Implement** the solution
 2. **Verify locally**: \`npm test && npm run lint && npm run build\`
 3. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
-4. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
+4. **Write handoff notes** (see below)
+5. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
 
 PR body format:
 \`\`\`
@@ -56,6 +57,31 @@ PR body format:
 
 Closes #${ticket.github_issue_number}
 \`\`\`
+
+## BEFORE YOU FINISH: Write Handoff Notes
+
+**CRITICAL**: Before creating the PR, write a \`.claude-handoff.md\` file in the repo root with:
+
+\`\`\`markdown
+# Handoff Notes for Issue #${ticket.github_issue_number}
+
+## What I Did
+- [Brief summary of the approach taken]
+- [Key files modified and why]
+
+## How It Works
+- [Explain the core logic/approach]
+
+## Watch Out For
+- [Any tricky parts or edge cases]
+- [Things that might break or need attention]
+
+## If This Fails Review
+- [What to check first]
+- [Likely causes of issues]
+\`\`\`
+
+This helps the next agent (or yourself on retry) quickly understand the work done.
 
 IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases anywhere.
 `;
@@ -127,7 +153,19 @@ ${context.userMessages.join('\n')}
 
 This is attempt #${ticket.attempt_count}. A PR exists but has problems that need fixing.
 
-${problemsSection}${reviewFindingsSection}${commentsSection}${userMessagesSection}## Now investigate and fix
+${problemsSection}${reviewFindingsSection}${commentsSection}${userMessagesSection}## FIRST: Read the Handoff Notes
+
+**Start by reading \`.claude-handoff.md\`** if it exists. This contains notes from the previous attempt explaining:
+- What approach was taken
+- Key files modified
+- Tricky parts to watch out for
+- What to check if things fail
+
+\`\`\`bash
+cat .claude-handoff.md 2>/dev/null || echo "No handoff notes found"
+\`\`\`
+
+## Then investigate and fix
 
 Run these commands to understand the current state:
 
@@ -204,14 +242,25 @@ git commit -m "fix: <describe what you fixed>"
 git push
 \`\`\`
 
+## STEP 4: Update Handoff Notes
+
+Before pushing, update \`.claude-handoff.md\` with what you learned/fixed:
+- What the issue was
+- How you fixed it
+- Any new gotchas discovered
+
+This helps if another retry is needed.
+
 ## KEY RULES
 
+- **Read handoff notes first** - Don't start from scratch
 - **Investigate before acting** - Don't guess, look at the actual errors
 - **PRs target dev branch** - Never push to main
 - **No "by Claude" in commits/PRs** - Keep it clean
 - **Run checks locally** - Don't push and hope, verify first
+- **Update handoff notes** - Leave breadcrumbs for the next attempt
 
-The answers are in the git history, CI logs, and PR comments. Go find them.
+The answers are in the git history, CI logs, PR comments, and handoff notes. Go find them.
 `;
 }
 
