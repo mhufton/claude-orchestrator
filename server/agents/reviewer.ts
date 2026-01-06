@@ -12,7 +12,7 @@ const USE_SONNET_LABEL = 'use-sonnet';
 interface ReviewResult {
   ticketId: number;
   issueNumber: number;
-  verdict: 'ready' | 'minor_gaps' | 'needs_revision' | 'closed';
+  verdict: 'ready' | 'minor_gaps' | 'needs_revision' | 'closed' | 'epic';
   gaps: string[];
   recommendations: string | null;
   changesMade: string | null;
@@ -93,6 +93,16 @@ export async function runBatchReview(
         db.updateTicket(result.ticketId, { priority: result.priority });
         broadcastTicketUpdated(result.ticketId, { priority: result.priority });
         console.log(`[review] Issue #${result.issueNumber} priority set to ${result.priority}`);
+      }
+
+      // If epic, add epic label and keep in backlog (don't work on directly)
+      if (result.verdict === 'epic') {
+        await github.removeLabelFromIssue(result.issueNumber, CLAUDE_REVIEW_LABEL);
+        await github.addLabelToIssue(result.issueNumber, 'epic');
+        // Move to backlog but it won't be picked up for work due to epic detection
+        await github.addLabelToIssue(result.issueNumber, config.github.claudeReadyLabel);
+        console.log(`[review] Issue #${result.issueNumber} identified as EPIC, labeled and will be tracked for completion`);
+        continue; // Skip normal processing
       }
 
       // If ready, minor_gaps, or needs_revision, move to Ready column
@@ -209,21 +219,29 @@ Quick review of GitHub issue #<ISSUE_NUMBER> from ${owner}/${repo}.
    - Scope creep signs (AND, ALSO, additionally)?
    - Multiple unrelated features bundled?
 
-4. Complexity assessment:
+4. EPIC DETECTION (important!):
+   Is this an EPIC/PARENT ticket? Check for:
+   - Labels: epic, parent, meta, tracking, umbrella
+   - Body has "Sub-issues:", "Tasks:", "Deliverables:" sections
+   - Multiple checkbox items with issue references (- [ ] #123)
+   - References 3+ other issues
+   If EPIC: output VERDICT:epic (special handling, not worked directly)
+
+5. Complexity assessment:
    SIMPLE: Single file, bug fix, small refactor, docs, UI tweak
    COMPLEX: Multi-file architecture, new features, security, DB changes, AWS/CDK
 
-5. Priority assessment:
+6. Priority assessment:
    HIGH: Blocking work, security issues, production bugs
    MEDIUM: Regular features, non-critical bugs (default)
    LOW: Nice-to-have, polish, tech debt
 
-6. If gaps found, edit the issue to add missing info:
+7. If gaps found (and not an epic), edit the issue to add missing info:
    gh issue edit <ISSUE_NUMBER> --body "..."
 
-7. Output format (MUST include this exactly):
+8. Output format (MUST include this exactly):
    ISSUE:<ISSUE_NUMBER>
-   VERDICT:<ready|minor_gaps|needs_revision|closed>
+   VERDICT:<ready|minor_gaps|needs_revision|closed|epic>
    COMPLEXITY:<simple|complex>
    PRIORITY:<high|medium|low>
    GAPS:<comma-separated list or "none">
@@ -347,7 +365,7 @@ function parseCoordinatorResults(
     // Try to find this issue's results in the output
     const issuePattern = new RegExp(
       `ISSUE:\\s*${issueNumber}[\\s\\S]*?` +
-      `VERDICT:\\s*(ready|minor_gaps|needs_revision|closed)[\\s\\S]*?` +
+      `VERDICT:\\s*(ready|minor_gaps|needs_revision|closed|epic)[\\s\\S]*?` +
       `COMPLEXITY:\\s*(simple|complex)[\\s\\S]*?` +
       `PRIORITY:\\s*(high|medium|low)[\\s\\S]*?` +
       `GAPS:\\s*([^\\n]+)[\\s\\S]*?` +

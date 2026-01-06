@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS agent_todos (
 CREATE TABLE IF NOT EXISTS issue_reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_id INTEGER NOT NULL,
-  verdict TEXT NOT NULL CHECK (verdict IN ('ready', 'minor_gaps', 'needs_revision', 'closed')),
+  verdict TEXT NOT NULL CHECK (verdict IN ('ready', 'minor_gaps', 'needs_revision', 'closed', 'epic')),
   gaps TEXT DEFAULT '[]',
   recommendations TEXT,
   changes_made TEXT,

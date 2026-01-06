@@ -3,6 +3,7 @@ import { spawnAgent, isAgentRunning } from '../agents/spawner';
 import { runBatchReview, isReviewRunning } from '../agents/reviewer';
 import { syncIssues } from '../github/issues';
 import { broadcast } from '../ws/handler';
+import { shouldSkipForWork, detectEpic } from '../epics/detector';
 import type { Ticket } from '../state/types';
 
 // Track last sync to avoid syncing too frequently
@@ -148,8 +149,15 @@ async function autoStartReadyTickets(): Promise<void> {
     return;
   }
 
-  // Filter out blocked tickets
+  // Filter out blocked tickets and epics
   const unblockedTickets = readyTickets.filter(ticket => {
+    // Skip epics - they should not be worked on directly
+    if (shouldSkipForWork(ticket)) {
+      const epicInfo = detectEpic(ticket);
+      console.log(`[autoplay] Skipping epic #${ticket.github_issue_number} (${epicInfo.reason})`);
+      return false;
+    }
+
     const deps = db.getDependenciesForTicket(ticket.id);
     if (deps.blockedBy.length === 0) return true;
 
@@ -159,7 +167,7 @@ async function autoStartReadyTickets(): Promise<void> {
   });
 
   if (unblockedTickets.length === 0) {
-    console.log('[autoplay] All ready tickets are blocked, waiting');
+    console.log('[autoplay] All ready tickets are blocked or are epics, waiting');
     return;
   }
 

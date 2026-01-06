@@ -8,6 +8,7 @@ import { stopAllAgents, loadTodosFromDatabase } from './agents/spawner';
 import { startStaleAgentDetector } from './agents/stale-detector';
 import { initAutoPlay, stopAutoPlay } from './autoplay/loop';
 import { startStatusBroadcast, stopStatusBroadcast } from './poll-status';
+import { startEpicChecker, stopEpicChecker } from './epics/detector';
 import {
   addClient,
   removeClient,
@@ -64,6 +65,10 @@ console.log('Stale agent detector started (30s check interval, auto-respawn enab
 
 // Initialize auto-play if it was enabled
 initAutoPlay();
+
+// Start epic completion checker (checks every 5 minutes)
+startEpicChecker(300000);
+console.log('Epic completion checker started (5 min interval)');
 
 // Create HTTP + WebSocket server
 const server = Bun.serve({

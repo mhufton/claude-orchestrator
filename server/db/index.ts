@@ -404,7 +404,7 @@ export function getAllTodosGroupedByTicket(): Record<number, AgentTodo[]> {
 export interface IssueReview {
   id?: number;
   ticket_id: number;
-  verdict: 'ready' | 'minor_gaps' | 'needs_revision' | 'closed';
+  verdict: 'ready' | 'minor_gaps' | 'needs_revision' | 'closed' | 'epic';
   gaps: string; // JSON array
   recommendations: string | null;
   changes_made: string | null;
