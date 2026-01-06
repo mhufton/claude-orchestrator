@@ -24,6 +24,82 @@ interface WatchResult {
   score?: number;
 }
 
+/**
+ * Helper to respawn agent for a specific issue (merge conflicts, CI failures, etc.)
+ * Extracted to avoid code duplication for early respawn cases
+ */
+async function respawnForIssue(
+  ticket: Ticket,
+  reason: 'fixing_ci' | 'resolving_merge_conflict' | 'addressing_pr_comments' | 'improving_score',
+  issues: string[]
+): Promise<WatchResult> {
+  // CIRCUIT BREAKER: Check if we've exceeded max attempts
+  if (ticket.attempt_count >= MAX_AUTO_ATTEMPTS) {
+    console.log(`PR #${ticket.pr_number}: Maximum auto-attempts (${MAX_AUTO_ATTEMPTS}) reached. Flagging for human intervention.`);
+
+    db.updateTicket(ticket.id, {
+      needs_attention: 1,
+      attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
+    });
+    broadcastTicketUpdated(ticket.id, {
+      needs_attention: true,
+      attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
+    });
+
+    return {
+      action: 'error',
+      reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - requires human intervention`
+    };
+  }
+
+  console.log(`Auto-respawning agent for ticket #${ticket.github_issue_number} to fix: ${issues.join(', ')}`);
+
+  // Check if we need to acquire a slot
+  let slotToUse = ticket.worktree_slot;
+  if (!slotToUse) {
+    const branchName = ticket.branch_name || `claude/issue-${ticket.github_issue_number}`;
+    const allocation = await acquireSlot(ticket.id, branchName);
+    if (!allocation) {
+      console.warn(`Cannot respawn - no slots available for ticket ${ticket.id}`);
+      return { action: 'waiting', reason: 'No slots available for respawn' };
+    }
+    slotToUse = allocation.slot;
+    console.log(`Acquired slot ${slotToUse} for respawning ticket #${ticket.github_issue_number}`);
+  }
+
+  db.updateTicket(ticket.id, {
+    state: 'in_progress',
+    worktree_slot: slotToUse,
+    attempt_count: ticket.attempt_count + 1,
+    retry_reason: reason,
+    needs_attention: 0,
+    attention_reason: null
+  });
+  broadcastTicketUpdated(ticket.id, {
+    state: 'in_progress',
+    worktree_slot: slotToUse,
+    attempt_count: ticket.attempt_count + 1,
+    retry_reason: reason,
+    needs_attention: false,
+    attention_reason: null
+  });
+  broadcastSlotStatus();
+
+  const updatedTicket = db.getTicketById(ticket.id);
+  if (updatedTicket) {
+    spawnAgent(updatedTicket).catch(err => {
+      console.error(`Failed to respawn agent for ticket ${ticket.id}:`, err);
+    });
+  }
+
+  addActivity('respawn', `Respawned #${ticket.github_issue_number}: ${reason}`);
+
+  return {
+    action: 'respawned',
+    reason: `Agent respawned to fix: ${issues.join('; ')}`
+  };
+}
+
 export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
   if (!ticket.pr_number) {
     return { action: 'waiting', reason: 'No PR number' };
@@ -66,13 +142,49 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       return { action: 'waiting', reason: 'New commits detected, waiting for PR to update' };
     }
 
-    // Check CI status - REQUIRED before auto-merge
+    // ==========================================
+    // CHECK MERGE CONFLICTS / BEHIND FIRST
+    // No point waiting for CI if branch needs rebasing - CI will re-run anyway
+    // ==========================================
+
+    // Check if GitHub is still calculating mergeability
+    if (pr.mergeable === null) {
+      return { action: 'waiting', reason: 'Checking mergeability...' };
+    }
+
+    // Check if branch is behind main (but no conflicts)
+    // Auto-update via API first - no agent needed for simple behind state
+    if (pr.mergeable_state === 'behind') {
+      console.log(`PR #${ticket.pr_number}: Branch is behind main, attempting auto-update...`);
+      const updateResult = await github.updatePRBranch(ticket.pr_number);
+
+      if (updateResult.success) {
+        // Branch updated successfully, wait for CI to re-run
+        console.log(`PR #${ticket.pr_number}: Branch updated successfully, waiting for CI`);
+        return { action: 'waiting', reason: 'Branch updated to latest main, waiting for CI' };
+      } else if (updateResult.message.includes('conflict')) {
+        // Update failed due to conflicts - respawn agent to handle
+        console.log(`PR #${ticket.pr_number}: Auto-update failed due to conflicts, respawning agent`);
+        return await respawnForIssue(ticket, 'resolving_merge_conflict', ['Merge conflicts detected during auto-update']);
+      }
+      // Other failures: continue, agent may need to handle
+    }
+
+    // Check for merge conflicts - respawn immediately, don't wait for CI
+    if (pr.mergeable === false) {
+      console.log(`PR #${ticket.pr_number}: Has merge conflicts, respawning agent immediately`);
+      return await respawnForIssue(ticket, 'resolving_merge_conflict', ['Merge conflicts with main branch']);
+    }
+
+    // ==========================================
+    // BRANCH IS CLEAN - NOW CHECK CI STATUS
+    // ==========================================
+
     let checkStatus: { pending: boolean; allPassed: boolean; failures: Array<{ name: string }>; checksCompletedAt: Date | null } | null = null;
     try {
       checkStatus = await github.getCheckStatus(pr.head.sha);
     } catch (checkError) {
       console.warn('Could not fetch check status:', checkError instanceof Error ? checkError.message : checkError);
-      // Can't verify CI - don't auto-merge without CI confirmation
       return { action: 'waiting', reason: 'Cannot verify CI status - waiting' };
     }
 
@@ -82,7 +194,6 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     }
 
     // SAFETY CHECK: Ensure checks have been stable (completed) for a minimum time
-    // This prevents merging right as checks complete, giving time for any additional checks to start
     if (checkStatus.checksCompletedAt) {
       const timeSinceCompletion = Date.now() - checkStatus.checksCompletedAt.getTime();
       if (timeSinceCompletion < MIN_CHECK_STABILITY_MS) {
@@ -93,50 +204,19 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     }
 
     // ==========================================
-    // GATHER ALL ISSUES BEFORE DECIDING TO RESPAWN
-    // This prevents the agent from being respawned multiple times for different issues
+    // GATHER REMAINING ISSUES (CI failures, score, comments)
     // ==========================================
 
     const issues: string[] = [];
     let hasCIFailures = false;
-    let hasMergeConflicts = false;
     let hasLowScore = false;
     let hasUnrepliedComments = false;
-    let ciFailureNames = '';
 
     // Check CI status
     if (!checkStatus.allPassed) {
       hasCIFailures = true;
-      ciFailureNames = checkStatus.failures.map(f => f.name).join(', ');
+      const ciFailureNames = checkStatus.failures.map(f => f.name).join(', ');
       issues.push(`CI failures: ${ciFailureNames}`);
-    }
-
-    // Check for merge conflicts
-    if (pr.mergeable === false) {
-      hasMergeConflicts = true;
-      issues.push('Merge conflicts with main branch');
-    } else if (pr.mergeable === null) {
-      // GitHub is still calculating mergeability - wait
-      return { action: 'waiting', reason: 'Checking mergeability...' };
-    }
-
-    // Check if branch is behind main (but no conflicts)
-    // Auto-update via API - no agent needed for simple behind state
-    if (pr.mergeable_state === 'behind') {
-      console.log(`PR #${ticket.pr_number}: Branch is behind main, attempting auto-update...`);
-      const updateResult = await github.updatePRBranch(ticket.pr_number);
-
-      if (updateResult.success) {
-        // Branch updated successfully, wait for CI to re-run
-        console.log(`PR #${ticket.pr_number}: Branch updated successfully, waiting for CI`);
-        return { action: 'waiting', reason: 'Branch updated to latest main, waiting for CI' };
-      } else if (updateResult.message.includes('conflict')) {
-        // Update failed due to conflicts - this will be caught by mergeable === false on next check
-        console.log(`PR #${ticket.pr_number}: Auto-update failed due to conflicts, will handle as merge conflict`);
-        hasMergeConflicts = true;
-        issues.push('Merge conflicts with main branch (detected during auto-update)');
-      }
-      // Other failures: continue with normal flow, agent may need to handle
     }
 
     // Check review score and unreplied comments
@@ -158,84 +238,17 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       }
     }
 
-    console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, conflicts=${hasMergeConflicts}, score=${score?.total ?? 'none'}, unrepliedComments=${unrepliedComments.length}, attempt=${ticket.attempt_count}`);
+    console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, score=${score?.total ?? 'none'}, unrepliedComments=${unrepliedComments.length}, attempt=${ticket.attempt_count}`);
 
     // If there are ANY issues, respawn agent with ALL of them
+    // Note: Merge conflicts are already handled earlier in the flow
     if (issues.length > 0) {
-      // CIRCUIT BREAKER: Check if we've exceeded max attempts
-      if (ticket.attempt_count >= MAX_AUTO_ATTEMPTS) {
-        console.log(`PR #${ticket.pr_number}: Maximum auto-attempts (${MAX_AUTO_ATTEMPTS}) reached. Flagging for human intervention.`);
-
-        db.updateTicket(ticket.id, {
-          needs_attention: 1,
-          attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
-        });
-        broadcastTicketUpdated(ticket.id, {
-          needs_attention: true,
-          attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
-        });
-
-        return {
-          action: 'error',
-          reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - requires human intervention`,
-          score: score?.total
-        };
-      }
       // Determine primary retry reason (for UI display) - prioritize by severity
-      let primaryReason: 'fixing_ci' | 'resolving_merge_conflict' | 'addressing_pr_comments' | 'improving_score' = 'improving_score';
-      if (hasMergeConflicts) primaryReason = 'resolving_merge_conflict';
+      let primaryReason: 'fixing_ci' | 'addressing_pr_comments' | 'improving_score' = 'improving_score';
       if (hasCIFailures) primaryReason = 'fixing_ci';
       if (hasUnrepliedComments) primaryReason = 'addressing_pr_comments';
 
-      console.log(`Auto-respawning agent for ticket #${ticket.github_issue_number} to fix ${issues.length} issue(s): ${issues.join(', ')}`);
-
-      // Check if we need to acquire a slot (ticket may not have one if it was in_review)
-      let slotToUse = ticket.worktree_slot;
-      if (!slotToUse) {
-        // Need to acquire a new slot
-        const branchName = ticket.branch_name || `claude/issue-${ticket.github_issue_number}`;
-        const allocation = await acquireSlot(ticket.id, branchName);
-        if (!allocation) {
-          console.warn(`Cannot respawn - no slots available for ticket ${ticket.id}`);
-          return {
-            action: 'waiting',
-            reason: 'No slots available for respawn'
-          };
-        }
-        slotToUse = allocation.slot;
-        console.log(`Acquired slot ${slotToUse} for respawning ticket #${ticket.github_issue_number}`);
-      }
-
-      db.updateTicket(ticket.id, {
-        state: 'in_progress',
-        worktree_slot: slotToUse,
-        attempt_count: ticket.attempt_count + 1,
-        retry_reason: primaryReason,
-        needs_attention: 0,
-        attention_reason: null
-      });
-      broadcastTicketUpdated(ticket.id, {
-        state: 'in_progress',
-        worktree_slot: slotToUse,
-        attempt_count: ticket.attempt_count + 1,
-        retry_reason: primaryReason,
-        needs_attention: false,
-        attention_reason: null
-      });
-      broadcastSlotStatus();
-
-      const updatedTicket = db.getTicketById(ticket.id);
-      if (updatedTicket) {
-        spawnAgent(updatedTicket).catch(err => {
-          console.error(`Failed to respawn agent for ticket ${ticket.id}:`, err);
-        });
-      }
-
-      return {
-        action: 'respawned',
-        reason: `Agent respawned to fix: ${issues.join('; ')}`,
-        score: score?.total
-      };
+      return await respawnForIssue(ticket, primaryReason, issues);
     }
 
     // No issues and no score yet - wait for review
