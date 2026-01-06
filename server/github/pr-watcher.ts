@@ -10,8 +10,8 @@ const SCORE_THRESHOLD = 90;
 
 // Maximum attempts before requiring human intervention
 // After this many attempts, stop auto-respawning and flag for attention
-// Set high enough to allow agent to iterate, but not infinite
-const MAX_AUTO_ATTEMPTS = 15;
+// Keep low - if agent can't solve in 3 attempts, it needs human guidance
+const MAX_AUTO_ATTEMPTS = 3;
 
 // Minimum time (in ms) that all checks must be completed before we consider merging
 // This prevents merging when new checks are still being created
