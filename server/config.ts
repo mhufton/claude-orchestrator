@@ -47,7 +47,7 @@ export function loadConfig(): Config {
     },
     intervals: {
       issueSync: parseInt(optionalEnv('ISSUE_SYNC_INTERVAL', '60000'), 10),
-      prWatch: parseInt(optionalEnv('PR_WATCH_INTERVAL', '15000'), 10),  // 15s for faster PR feedback
+      prWatch: parseInt(optionalEnv('PR_WATCH_INTERVAL', '30000'), 10),  // 30s for PR checks
     },
   };
 }

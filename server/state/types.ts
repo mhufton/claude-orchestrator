@@ -23,6 +23,7 @@ export interface Ticket {
   retry_reason: RetryReason;
   priority: Priority;
   position: number;
+  handoff_notes: string | null;
   created_at: string;
   updated_at: string;
 }

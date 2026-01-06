@@ -559,6 +559,26 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
   console.log(`Agent for ticket #${ticket.github_issue_number} exited with code ${exitCode}`);
 
+  // Capture handoff notes from the worktree if they exist
+  const handoffPath = `${worktreePath}/.claude-handoff.md`;
+  try {
+    const handoffFile = Bun.file(handoffPath);
+    if (await handoffFile.exists()) {
+      const handoffContent = await handoffFile.text();
+      if (handoffContent.trim()) {
+        db.updateTicket(ticket.id, { handoff_notes: handoffContent });
+        console.log(`[agent] Captured handoff notes for ticket #${ticket.github_issue_number} (${handoffContent.length} chars)`);
+
+        // Clean up the file so it's not committed
+        await Bun.write(handoffPath, '');
+        const { $ } = await import('bun');
+        await $`cd ${worktreePath} && git checkout -- .claude-handoff.md 2>/dev/null || rm -f .claude-handoff.md`.quiet();
+      }
+    }
+  } catch (err) {
+    console.warn(`[agent] Could not capture handoff notes for ticket #${ticket.github_issue_number}:`, err);
+  }
+
   // Check for pending chat messages and continue if any
   const sessionId = agentSessionIds.get(ticket.id);
   if (sessionId) {

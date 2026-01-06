@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   retry_reason TEXT,
   priority TEXT DEFAULT 'medium' CHECK (priority IN ('high', 'medium', 'low')),
   position INTEGER DEFAULT 0,
+  handoff_notes TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );

@@ -110,6 +110,12 @@ function runMigrations(): void {
     db.exec('ALTER TABLE tickets ADD COLUMN position INTEGER DEFAULT 0');
   }
 
+  // Migration: Add handoff_notes column
+  if (!columnNames.has('handoff_notes')) {
+    console.log('Migrating database: adding handoff_notes column');
+    db.exec('ALTER TABLE tickets ADD COLUMN handoff_notes TEXT');
+  }
+
   // Migration: Create ticket_dependencies table
   const tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='ticket_dependencies'").all();
   if (tables.length === 0) {
@@ -187,7 +193,8 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
   const allowedFields = [
     'state', 'worktree_slot', 'pr_number', 'pr_url',
     'branch_name', 'current_score', 'attempt_count', 'title', 'body', 'labels',
-    'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position'
+    'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position',
+    'handoff_notes'
   ];
 
   const updates: string[] = [];

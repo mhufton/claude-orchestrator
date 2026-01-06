@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { Sidebar } from './Sidebar';
-import { StatusBar } from './StatusBar';
 
 interface LayoutProps {
   children: ReactNode;
@@ -58,9 +57,6 @@ export function Layout({ children }: LayoutProps) {
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-gray-100">
-      {/* Status bar at top */}
-      <StatusBar />
-
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
         <div style={{ width: sidebarWidth }} className="flex-shrink-0">

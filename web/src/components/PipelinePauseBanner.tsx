@@ -3,6 +3,16 @@ import { AlertTriangle, Pause, Play, X, RefreshCw, Loader2, Zap, ZapOff } from '
 import { useTicketsStore } from '../stores/tickets';
 import { useWebSocket } from '../hooks/useWebSocket';
 
+function formatCountdown(nextRun: number | null): string {
+  if (!nextRun) return '--';
+  const remaining = Math.max(0, nextRun - Date.now());
+  const seconds = Math.floor(remaining / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${minutes}m ${secs}s`;
+}
+
 // Separate pause button component that can be positioned elsewhere
 function PauseButton({ onClick }: { onClick: () => void }) {
   return (
@@ -67,9 +77,17 @@ export function PipelinePauseBanner() {
   const { send } = useWebSocket();
   const pipelineStatus = useTicketsStore(state => state.pipelineStatus);
   const autoplayStatus = useTicketsStore(state => state.autoplayStatus);
+  const pollStatus = useTicketsStore(state => state.pollStatus);
   const [showPauseDialog, setShowPauseDialog] = useState(false);
   const [pauseReason, setPauseReason] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
+  const [, setTick] = useState(0);
+
+  // Update countdown every second
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleToggleAutoPlay = () => {
     if (autoplayStatus.enabled) {
@@ -172,15 +190,30 @@ export function PipelinePauseBanner() {
 
   return (
     <>
-      {/* Header bar with sync, autoplay, and pause buttons on the right */}
-      <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-gray-800/50 shrink-0">
-        <SyncButton onClick={handleSync} isSyncing={isSyncing} />
-        <AutoPlayButton
-          enabled={autoplayStatus.enabled}
-          active={autoplayStatus.active}
-          onClick={handleToggleAutoPlay}
-        />
-        <PauseButton onClick={() => setShowPauseDialog(true)} />
+      {/* Header bar with poll status and controls */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-800/50 shrink-0">
+        {/* Poll countdowns on the left */}
+        <div className="flex items-center gap-4 text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="text-gray-500">PR Check:</span>
+            <span className="text-blue-400 font-mono">{formatCountdown(pollStatus.prWatch.nextRun)}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-gray-500">Issue Sync:</span>
+            <span className="text-purple-400 font-mono">{formatCountdown(pollStatus.issueSync.nextRun)}</span>
+          </div>
+        </div>
+
+        {/* Controls on the right */}
+        <div className="flex items-center gap-2">
+          <SyncButton onClick={handleSync} isSyncing={isSyncing} />
+          <AutoPlayButton
+            enabled={autoplayStatus.enabled}
+            active={autoplayStatus.active}
+            onClick={handleToggleAutoPlay}
+          />
+          <PauseButton onClick={() => setShowPauseDialog(true)} />
+        </div>
       </div>
 
       {/* Pause dialog */}

@@ -81,6 +81,7 @@ Closes #${ticket.github_issue_number}
 - [Likely causes of issues]
 \`\`\`
 
+**IMPORTANT:** Do NOT commit this file. The orchestrator will capture it automatically.
 This helps the next agent (or yourself on retry) quickly understand the work done.
 
 IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases anywhere.
@@ -149,23 +150,20 @@ ${context.userMessages.join('\n')}
 `
     : '';
 
+  // Include handoff notes from database if available
+  const handoffSection = ticket.handoff_notes
+    ? `## Handoff Notes from Previous Attempt:
+
+${ticket.handoff_notes}
+
+`
+    : '';
+
   return `You are continuing work on GitHub issue #${ticket.github_issue_number}: "${ticket.title}"
 
 This is attempt #${ticket.attempt_count}. A PR exists but has problems that need fixing.
 
-${problemsSection}${reviewFindingsSection}${commentsSection}${userMessagesSection}## FIRST: Read the Handoff Notes
-
-**Start by reading \`.claude-handoff.md\`** if it exists. This contains notes from the previous attempt explaining:
-- What approach was taken
-- Key files modified
-- Tricky parts to watch out for
-- What to check if things fail
-
-\`\`\`bash
-cat .claude-handoff.md 2>/dev/null || echo "No handoff notes found"
-\`\`\`
-
-## Then investigate and fix
+${problemsSection}${reviewFindingsSection}${commentsSection}${userMessagesSection}${handoffSection}## Investigate and fix
 
 Run these commands to understand the current state:
 
@@ -249,18 +247,17 @@ Before pushing, update \`.claude-handoff.md\` with what you learned/fixed:
 - How you fixed it
 - Any new gotchas discovered
 
-This helps if another retry is needed.
+**IMPORTANT:** Do NOT commit this file. The orchestrator will capture it automatically.
 
 ## KEY RULES
 
-- **Read handoff notes first** - Don't start from scratch
 - **Investigate before acting** - Don't guess, look at the actual errors
 - **PRs target dev branch** - Never push to main
 - **No "by Claude" in commits/PRs** - Keep it clean
 - **Run checks locally** - Don't push and hope, verify first
-- **Update handoff notes** - Leave breadcrumbs for the next attempt
+- **Update handoff notes** - Leave breadcrumbs for the next attempt (but don't commit the file)
 
-The answers are in the git history, CI logs, PR comments, and handoff notes. Go find them.
+The answers are in the git history, CI logs, and PR comments. Go find them.
 `;
 }
 
