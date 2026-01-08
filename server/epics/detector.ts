@@ -39,6 +39,12 @@ export function detectEpic(ticket: Ticket): EpicInfo {
     checkboxes: []
   };
 
+  // Spikes are NOT epics - they're investigation/research tasks
+  // They often have "## Deliverables" sections which would trigger epic detection
+  if (ticket.title.toLowerCase().includes('[spike]')) {
+    return result;
+  }
+
   // Check 1: Label-based detection
   let labels: string[] = [];
   try {
