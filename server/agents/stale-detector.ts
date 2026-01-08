@@ -69,8 +69,8 @@ async function checkForStaleAgents(): Promise<void> {
     // FIRST: If process is NOT running, respawn (self-healing for crashes)
     if (!processRunning) {
       // Limit auto-restarts to prevent infinite loops on genuinely stuck tickets
-      // Should match MAX_AUTO_ATTEMPTS in pr-watcher.ts
-      const MAX_AUTO_RESTARTS = 15;
+      // Unified with pr-watcher.ts and spawner.ts
+      const MAX_AUTO_RESTARTS = 3;
       if (ticket.attempt_count >= MAX_AUTO_RESTARTS) {
         console.log(`[stale-detector] Ticket #${ticket.github_issue_number} hit ${MAX_AUTO_RESTARTS} attempts, flagging for review`);
         db.updateTicket(ticket.id, {
@@ -84,7 +84,12 @@ async function checkForStaleAgents(): Promise<void> {
         continue;
       }
 
-      console.log(`[self-heal] Agent for ticket #${ticket.github_issue_number} not running, auto-respawning (attempt ${ticket.attempt_count + 1})`);
+      // Exponential backoff: attempt 1 = 2s, attempt 2 = 30s, attempt 3 = 2min
+      const backoffDelays = [2000, 30000, 120000];
+      const delayMs = backoffDelays[Math.min(ticket.attempt_count, backoffDelays.length - 1)];
+      const delayDesc = delayMs >= 60000 ? `${delayMs / 60000}min` : `${delayMs / 1000}s`;
+
+      console.log(`[stale-detector] Agent for ticket #${ticket.github_issue_number} not running, respawning in ${delayDesc} (attempt ${ticket.attempt_count + 1}/${MAX_AUTO_RESTARTS})`);
 
       db.updateTicket(ticket.id, {
         attempt_count: ticket.attempt_count + 1,
@@ -100,15 +105,18 @@ async function checkForStaleAgents(): Promise<void> {
         attention_reason: null
       });
 
-      // Respawn the agent
-      try {
-        const updatedTicket = db.getTicketById(ticket.id);
-        if (updatedTicket) {
-          await spawnAgent(updatedTicket);
+      // Respawn the agent after backoff delay
+      const ticketId = ticket.id;
+      setTimeout(async () => {
+        try {
+          const updatedTicket = db.getTicketById(ticketId);
+          if (updatedTicket && updatedTicket.state === 'in_progress') {
+            await spawnAgent(updatedTicket);
+          }
+        } catch (err) {
+          console.error(`[stale-detector] Failed to respawn agent for ticket ${ticketId}:`, err);
         }
-      } catch (err) {
-        console.error(`[self-heal] Failed to respawn agent for ticket ${ticket.id}:`, err);
-      }
+      }, delayMs);
       continue; // Done with this ticket
     }
 

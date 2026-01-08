@@ -99,10 +99,10 @@ function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
     return 'sonnet';
   }
 
-  // Default: sonnet for first attempt only, opus for 2+ to avoid getting stuck
-  // Escalating early reduces loop iterations and gets more capable model sooner
-  if (ticket.attempt_count >= 2) {
-    console.log(`[model] Using opus for #${ticket.github_issue_number} (attempt ${ticket.attempt_count} >= 2, escalating to avoid loops)`);
+  // Default: sonnet for attempts 1-2, opus for 3+ to balance cost vs capability
+  // Sonnet with rich retry context can solve most issues - only escalate if truly stuck
+  if (ticket.attempt_count >= 3) {
+    console.log(`[model] Using opus for #${ticket.github_issue_number} (attempt ${ticket.attempt_count} >= 3, escalating after sonnet retries)`);
     return 'opus';
   }
 
@@ -638,23 +638,30 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     });
   } else {
     // Agent finished but no PR
-    const MAX_AUTO_ATTEMPTS = 5;
+    const MAX_AUTO_ATTEMPTS = 3; // Unified with pr-watcher.ts
 
     if (exitCode !== 0 && ticket.attempt_count < MAX_AUTO_ATTEMPTS) {
       // Non-zero exit code - auto-respawn (self-healing)
-      console.log(`[self-heal] Agent for ticket #${ticket.github_issue_number} exited with code ${exitCode}, auto-respawning (attempt ${ticket.attempt_count + 1}/${MAX_AUTO_ATTEMPTS})`);
+      const nextAttempt = ticket.attempt_count + 1;
+
+      // Exponential backoff: attempt 1 = 2s, attempt 2 = 30s, attempt 3 = 2min
+      const backoffDelays = [2000, 30000, 120000];
+      const delayMs = backoffDelays[Math.min(ticket.attempt_count, backoffDelays.length - 1)];
+      const delayDesc = delayMs >= 60000 ? `${delayMs / 60000}min` : `${delayMs / 1000}s`;
+
+      console.log(`[self-heal] Agent for ticket #${ticket.github_issue_number} exited with code ${exitCode}, respawning in ${delayDesc} (attempt ${nextAttempt}/${MAX_AUTO_ATTEMPTS})`);
 
       db.updateTicket(ticket.id, {
-        attempt_count: ticket.attempt_count + 1,
+        attempt_count: nextAttempt,
         retry_reason: 'fixing_ci'
       });
 
       broadcastTicketUpdated(ticket.id, {
-        attempt_count: ticket.attempt_count + 1,
+        attempt_count: nextAttempt,
         retry_reason: 'fixing_ci'
       });
 
-      // Auto-respawn after a short delay
+      // Auto-respawn after backoff delay
       setTimeout(() => {
         const updatedTicket = db.getTicketById(ticket.id);
         if (updatedTicket && updatedTicket.state === 'in_progress') {
@@ -662,7 +669,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
             console.error(`[self-heal] Failed to respawn agent for ticket ${ticket.id}:`, err);
           });
         }
-      }, 2000);
+      }, delayMs);
     } else {
       // Either exitCode 0 with no PR, or max attempts reached - flag for attention
       const reason = exitCode === 0
