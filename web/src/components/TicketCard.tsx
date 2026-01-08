@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { ExternalLink, Play, RotateCcw, GitBranch, CheckCircle2, XCircle, Clock, Loader2, MessageSquare, TrendingUp, Wrench, Square, CheckSquare, Lock, Link2 } from 'lucide-react';
+import { ExternalLink, Play, RotateCcw, GitBranch, CheckCircle2, XCircle, Clock, Loader2, MessageSquare, TrendingUp, Wrench, Square, CheckSquare, Lock, Link2, Pause, PlayCircle } from 'lucide-react';
 import { useTicketsStore } from '../stores/tickets';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Ticket, RetryReason, Priority } from '../lib/types';
@@ -179,6 +179,14 @@ export function TicketCard({
     setPendingAction(null);
   }, [ticket.state]);
 
+  // Timeout to clear stuck pending state (e.g., if start fails without state change)
+  useEffect(() => {
+    if (pendingAction) {
+      const timeout = setTimeout(() => setPendingAction(null), 10000);
+      return () => clearTimeout(timeout);
+    }
+  }, [pendingAction]);
+
   // Subscribe directly to this ticket's logs and todos for real-time progress updates
   const logs = useTicketsStore(state => state.agentLogs.get(ticket.id) || []);
   const todos = useTicketsStore(state => state.agentTodos.get(ticket.id) || []);
@@ -219,6 +227,17 @@ export function TicketCard({
           <span className="font-medium">Needs attention</span>
           {ticket.attention_reason && (
             <span className="text-red-400 truncate">- {ticket.attention_reason}</span>
+          )}
+        </div>
+      )}
+
+      {/* Paused banner */}
+      {Boolean(ticket.paused) && !needsAttention && (
+        <div className="flex items-center gap-2 mb-2 px-2 py-1 bg-yellow-900/50 rounded text-yellow-300 text-xs">
+          <Pause size={12} />
+          <span className="font-medium">Paused</span>
+          {ticket.pause_reason && (
+            <span className="text-yellow-400 truncate">- {ticket.pause_reason}</span>
           )}
         </div>
       )}
@@ -392,6 +411,28 @@ export function TicketCard({
       {/* Status info */}
       <div className="flex items-center justify-between text-xs text-gray-400">
         <div className="flex items-center gap-2">
+          {/* Pause/Resume button - for backlog and in_review states */}
+          {(ticket.state === 'backlog' || ticket.state === 'in_review') && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (Boolean(ticket.paused)) {
+                  send({ type: 'resume_ticket', ticketId: ticket.id });
+                } else {
+                  send({ type: 'pause_ticket', ticketId: ticket.id, reason: 'Manual verification needed' });
+                }
+              }}
+              className={`shrink-0 p-1 rounded transition-colors ${
+                Boolean(ticket.paused)
+                  ? 'text-yellow-400 bg-yellow-900/50 hover:bg-yellow-900'
+                  : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700'
+              }`}
+              title={Boolean(ticket.paused) ? 'Resume autoplay for this ticket' : 'Pause autoplay for this ticket'}
+            >
+              {Boolean(ticket.paused) ? <PlayCircle size={14} /> : <Pause size={14} />}
+            </button>
+          )}
+
           {/* Priority badge - click to cycle */}
           <button
             onClick={cyclePriority}

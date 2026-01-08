@@ -116,6 +116,78 @@ function runMigrations(): void {
     db.exec('ALTER TABLE tickets ADD COLUMN handoff_notes TEXT');
   }
 
+  // Migration: Add paused column for per-ticket pause feature
+  if (!columnNames.has('paused')) {
+    console.log('Migrating database: adding paused column');
+    db.exec('ALTER TABLE tickets ADD COLUMN paused INTEGER DEFAULT 0');
+  }
+
+  // Migration: Add pause_reason column
+  if (!columnNames.has('pause_reason')) {
+    console.log('Migrating database: adding pause_reason column');
+    db.exec('ALTER TABLE tickets ADD COLUMN pause_reason TEXT');
+  }
+
+  // Migration: Expand worktree_slot constraint from 1-3 to 1-10
+  if (tableInfo && tableInfo.sql.includes('BETWEEN 1 AND 3')) {
+    console.log('Migrating database: expanding worktree_slot constraint from 1-3 to 1-10');
+
+    // Create new table with expanded constraint
+    db.exec(`
+      CREATE TABLE tickets_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        github_issue_number INTEGER NOT NULL UNIQUE,
+        github_issue_url TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT,
+        labels TEXT DEFAULT '[]',
+        state TEXT NOT NULL DEFAULT 'backlog' CHECK (state IN ('needs_review', 'backlog', 'in_progress', 'in_review', 'done')),
+        worktree_slot INTEGER CHECK (worktree_slot IS NULL OR worktree_slot BETWEEN 1 AND 10),
+        pr_number INTEGER,
+        pr_url TEXT,
+        branch_name TEXT,
+        current_score INTEGER,
+        attempt_count INTEGER DEFAULT 0,
+        needs_attention INTEGER DEFAULT 0,
+        attention_reason TEXT,
+        retry_reason TEXT,
+        priority TEXT DEFAULT 'medium' CHECK (priority IN ('high', 'medium', 'low')),
+        position INTEGER DEFAULT 0,
+        handoff_notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Copy data from old table
+    db.exec(`
+      INSERT INTO tickets_new (
+        id, github_issue_number, github_issue_url, title, body, labels, state,
+        worktree_slot, pr_number, pr_url, branch_name, current_score,
+        attempt_count, needs_attention, attention_reason, retry_reason,
+        priority, position, handoff_notes, created_at, updated_at
+      )
+      SELECT
+        id, github_issue_number, github_issue_url, title, body, labels, state,
+        worktree_slot, pr_number, pr_url, branch_name, current_score,
+        attempt_count, needs_attention, attention_reason, retry_reason,
+        priority, position, handoff_notes, created_at, updated_at
+      FROM tickets
+    `);
+
+    // Drop old table and rename new one
+    db.exec('DROP TABLE tickets');
+    db.exec('ALTER TABLE tickets_new RENAME TO tickets');
+
+    // Recreate indexes
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_state ON tickets(state)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_issue_number ON tickets(github_issue_number)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_priority ON tickets(priority)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_position ON tickets(position)');
+
+    console.log('Migration complete: worktree_slot now supports up to 10 slots');
+  }
+
   // Migration: Create ticket_dependencies table
   const tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='ticket_dependencies'").all();
   if (tables.length === 0) {
@@ -194,7 +266,7 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
     'state', 'worktree_slot', 'pr_number', 'pr_url',
     'branch_name', 'current_score', 'attempt_count', 'title', 'body', 'labels',
     'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position',
-    'handoff_notes'
+    'handoff_notes', 'paused', 'pause_reason'
   ];
 
   const updates: string[] = [];
@@ -268,9 +340,7 @@ export function getAvailableSlot(): number | null {
 
   const used = new Set(usedSlots.map(r => r.worktree_slot));
 
-  // Cap at 3 due to database CHECK constraint (worktree_slot BETWEEN 1 AND 3)
-  // TODO: Update database schema if more slots are needed
-  const maxSlots = Math.min(getSettings().maxAgentSlots, 3);
+  const maxSlots = getSettings().maxAgentSlots;
   for (let slot = 1; slot <= maxSlots; slot++) {
     if (!used.has(slot)) return slot;
   }
@@ -558,4 +628,138 @@ export function saveSettings(settings: Partial<OrchestratorSettings>): Orchestra
   const updated = { ...current, ...settings };
   setSyncState('orchestrator_settings', JSON.stringify(updated));
   return updated;
+}
+
+// Command queue operations (for serializing heavy operations like test/build/lint)
+export interface QueuedCommand {
+  id: number;
+  slot: number;
+  command_type: string;
+  command: string;
+  status: 'waiting' | 'running' | 'done' | 'cancelled';
+  requested_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export function enqueueCommand(slot: number, commandType: string, command: string): QueuedCommand {
+  const result = db.query(`
+    INSERT INTO command_queue (slot, command_type, command, status)
+    VALUES (?, ?, ?, 'waiting')
+  `).run(slot, commandType, command);
+
+  return getQueuedCommandById(Number(result.lastInsertRowid))!;
+}
+
+export function getQueuedCommandById(id: number): QueuedCommand | undefined {
+  return db.query('SELECT * FROM command_queue WHERE id = ?').get(id) as QueuedCommand | undefined;
+}
+
+export function getQueuePosition(id: number): number {
+  // Count how many commands are ahead of this one (waiting or running, requested before this one)
+  const cmd = getQueuedCommandById(id);
+  if (!cmd) return -1;
+
+  const ahead = db.query(`
+    SELECT COUNT(*) as count FROM command_queue
+    WHERE status IN ('waiting', 'running')
+    AND requested_at < ?
+  `).get(cmd.requested_at) as { count: number };
+
+  return ahead.count;
+}
+
+export function canStartCommand(id: number): boolean {
+  // Check if this command can start (no other commands running, and it's at the front of the queue)
+  const cmd = getQueuedCommandById(id);
+  if (!cmd || cmd.status !== 'waiting') return false;
+
+  // Check if any command is currently running
+  const running = db.query(`
+    SELECT COUNT(*) as count FROM command_queue WHERE status = 'running'
+  `).get() as { count: number };
+
+  if (running.count > 0) return false;
+
+  // Check if this is the oldest waiting command
+  const oldest = db.query(`
+    SELECT id FROM command_queue
+    WHERE status = 'waiting'
+    ORDER BY requested_at ASC
+    LIMIT 1
+  `).get() as { id: number } | undefined;
+
+  return oldest?.id === id;
+}
+
+export function startCommand(id: number): boolean {
+  if (!canStartCommand(id)) return false;
+
+  db.query(`
+    UPDATE command_queue
+    SET status = 'running', started_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+
+  return true;
+}
+
+export function completeCommand(id: number): void {
+  db.query(`
+    UPDATE command_queue
+    SET status = 'done', completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+}
+
+export function cancelCommand(id: number): void {
+  db.query(`
+    UPDATE command_queue
+    SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+}
+
+export function getCommandQueueStatus(): { waiting: number; running: QueuedCommand | null; queue: QueuedCommand[] } {
+  const waiting = db.query(`
+    SELECT COUNT(*) as count FROM command_queue WHERE status = 'waiting'
+  `).get() as { count: number };
+
+  const running = db.query(`
+    SELECT * FROM command_queue WHERE status = 'running' LIMIT 1
+  `).get() as QueuedCommand | undefined;
+
+  const queue = db.query(`
+    SELECT * FROM command_queue
+    WHERE status IN ('waiting', 'running')
+    ORDER BY requested_at ASC
+  `).all() as QueuedCommand[];
+
+  return {
+    waiting: waiting.count,
+    running: running || null,
+    queue
+  };
+}
+
+export function cleanupOldQueueEntries(olderThanHours: number = 24): number {
+  const result = db.query(`
+    DELETE FROM command_queue
+    WHERE status IN ('done', 'cancelled')
+    AND completed_at < datetime('now', '-' || ? || ' hours')
+  `).run(olderThanHours);
+
+  return result.changes;
+}
+
+export function cancelStaleCommands(olderThanMinutes: number = 30): number {
+  // Cancel commands that have been running for too long (likely orphaned)
+  const result = db.query(`
+    UPDATE command_queue
+    SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
+    WHERE status = 'running'
+    AND started_at < datetime('now', '-' || ? || ' minutes')
+  `).run(olderThanMinutes);
+
+  return result.changes;
 }

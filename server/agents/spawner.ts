@@ -1,4 +1,5 @@
 import { spawn, type Subprocess } from 'bun';
+import { join, dirname } from 'path';
 import * as db from '../db';
 import { getWorktreePath } from '../worktrees/manager';
 import { buildAgentPrompt } from './prompts';
@@ -7,6 +8,9 @@ import { getPRsForBranch, getPRsForBranchPrefix, getPRsForIssue, getIssue, getPR
 import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
 import type { Ticket } from '../state/types';
+
+// Path to orchestrator bin directory (for queue-run and other tools)
+const ORCHESTRATOR_BIN = join(dirname(dirname(import.meta.dir)), 'bin');
 
 // Track current todos for each ticket
 const ticketTodos = new Map<number, AgentTodo[]>();
@@ -134,7 +138,10 @@ async function continueAgentConversation(
     stderr: 'pipe',
     env: {
       ...process.env,
-      PWD: worktreePath
+      PWD: worktreePath,
+      PATH: `${ORCHESTRATOR_BIN}:${process.env.PATH}`,
+      WORKTREE_SLOT: String(ticket.worktree_slot),
+      ORCHESTRATOR_URL: `http://localhost:${process.env.PORT || 3456}`
     }
   });
 
@@ -494,7 +501,10 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     stderr: 'pipe',
     env: {
       ...process.env,
-      PWD: worktreePath
+      PWD: worktreePath,
+      PATH: `${ORCHESTRATOR_BIN}:${process.env.PATH}`,
+      WORKTREE_SLOT: String(ticket.worktree_slot),
+      ORCHESTRATOR_URL: `http://localhost:${process.env.PORT || 3456}`
     }
   });
 

@@ -2,8 +2,6 @@ import * as db from '../db';
 import { createWorktree, removeWorktree, getWorktreePath } from './manager';
 import { broadcastSlotStatus } from '../ws/handler';
 
-const MAX_SLOTS = 3;
-
 export interface SlotAllocation {
   slot: number;
   worktreePath: string;
@@ -40,7 +38,8 @@ export async function acquireSlot(ticketId: number, branchName: string): Promise
 }
 
 export async function releaseSlot(slot: number): Promise<void> {
-  if (slot < 1 || slot > MAX_SLOTS) {
+  const maxSlots = db.getSettings().maxAgentSlots;
+  if (slot < 1 || slot > maxSlots) {
     console.warn(`Invalid slot number: ${slot}`);
     return;
   }

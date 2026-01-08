@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   body TEXT,
   labels TEXT DEFAULT '[]',
   state TEXT NOT NULL DEFAULT 'backlog' CHECK (state IN ('needs_review', 'backlog', 'in_progress', 'in_review', 'done')),
-  worktree_slot INTEGER CHECK (worktree_slot IS NULL OR worktree_slot BETWEEN 1 AND 3),
+  worktree_slot INTEGER CHECK (worktree_slot IS NULL OR worktree_slot BETWEEN 1 AND 10),
   pr_number INTEGER,
   pr_url TEXT,
   branch_name TEXT,
@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   priority TEXT DEFAULT 'medium' CHECK (priority IN ('high', 'medium', 'low')),
   position INTEGER DEFAULT 0,
   handoff_notes TEXT,
+  paused INTEGER DEFAULT 0,
+  pause_reason TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -86,6 +88,18 @@ CREATE TABLE IF NOT EXISTS ticket_dependencies (
   UNIQUE(ticket_id, depends_on_id)
 );
 
+-- Command queue (for serializing heavy operations like test/build/lint)
+CREATE TABLE IF NOT EXISTS command_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  slot INTEGER NOT NULL,
+  command_type TEXT NOT NULL,
+  command TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'running', 'done', 'cancelled')),
+  requested_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT,
+  completed_at TEXT
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_tickets_state ON tickets(state);
 CREATE INDEX IF NOT EXISTS idx_tickets_issue_number ON tickets(github_issue_number);
@@ -98,3 +112,5 @@ CREATE INDEX IF NOT EXISTS idx_agent_todos_ticket ON agent_todos(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_issue_reviews_ticket ON issue_reviews(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_ticket ON ticket_dependencies(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON ticket_dependencies(depends_on_id);
+CREATE INDEX IF NOT EXISTS idx_command_queue_status ON command_queue(status);
+CREATE INDEX IF NOT EXISTS idx_command_queue_slot ON command_queue(slot);

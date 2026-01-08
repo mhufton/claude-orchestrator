@@ -26,9 +26,11 @@ ${ticket.body || 'No description provided.'}
 
 **BEFORE creating a PR, you MUST verify:**
 1. The actual problem described in the issue is SOLVED
-2. Tests pass (\`npm test\`)
-3. Lint passes (\`npm run lint\`)
-4. Build passes (\`npm run build\`)
+2. Tests pass (\`queue-run test npm test\`)
+3. Lint passes (\`queue-run lint npm run lint\`)
+4. Build passes (\`queue-run build npm run build\`)
+
+**IMPORTANT:** Use \`queue-run\` for all test/lint/build commands. This prevents resource contention when multiple agents run simultaneously. The command will wait in queue if another agent is running tests.
 
 **If you encounter obstacles:** Debug them. Read error messages carefully. Try different approaches.
 
@@ -37,12 +39,13 @@ ${ticket.body || 'No description provided.'}
 - **Simple is Better** - Don't over-engineer
 - **Small Commits, Small Scope** - Do one thing well
 - **PRs Target dev** - All PRs must target the \`dev\` branch, NOT \`main\`
-- **Scope Guard** - If a change isn't required for this issue, create a follow-up issue instead
+- **Scope Guard** - If a change isn't required for this issue, create a follow-up issue:
+  \`gh issue create --title "Follow-up: <description>" --body "..." --label "claude-review"\`
 
 ## WORKFLOW
 
 1. **Implement** the solution
-2. **Verify locally**: \`npm test && npm run lint && npm run build\`
+2. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 3. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
 4. **Write handoff notes** (see below)
 5. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
@@ -205,10 +208,10 @@ gh api repos/${repoOwner}/${repoName}/pulls/${ticket.pr_number}/comments | jq '.
 Based on your investigation:
 
 **If tests/lint/build failed:**
-1. Run the failing command locally: \`npm test\` or \`npm run lint\` or \`npm run build\`
+1. Run the failing command locally: \`queue-run test npm test\` or \`queue-run lint npm run lint\` or \`queue-run build npm run build\`
 2. Read the error output carefully
 3. Fix the code
-4. Verify locally before pushing: \`npm test && npm run lint && npm run build\`
+4. Verify locally before pushing: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 
 **If there are review comments:**
 1. Read each comment and understand what's being asked
@@ -228,9 +231,9 @@ Based on your investigation:
 
 ## STEP 3: VERIFY AND PUSH
 
-Before pushing, ALWAYS verify:
+Before pushing, ALWAYS verify (use queue-run to prevent resource contention):
 \`\`\`bash
-npm test && npm run lint && npm run build
+queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build
 \`\`\`
 
 If all pass, commit and push:
@@ -255,6 +258,7 @@ Before pushing, update \`.claude-handoff.md\` with what you learned/fixed:
 - **PRs target dev branch** - Never push to main
 - **No "by Claude" in commits/PRs** - Keep it clean
 - **Run checks locally** - Don't push and hope, verify first
+- **Use queue-run** - Always use \`queue-run test/lint/build\` to prevent resource contention
 - **Update handoff notes** - Leave breadcrumbs for the next attempt (but don't commit the file)
 
 The answers are in the git history, CI logs, and PR comments. Go find them.

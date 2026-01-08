@@ -111,7 +111,17 @@ async function autoReviewTriageItems(): Promise<void> {
     return;
   }
 
-  const triageTickets = db.getTicketsByState('needs_review');
+  const allTriageTickets = db.getTicketsByState('needs_review');
+
+  // Filter out known epics - they don't need re-reviewing
+  const triageTickets = allTriageTickets.filter(ticket => {
+    if (shouldSkipForWork(ticket)) {
+      const epicInfo = detectEpic(ticket);
+      console.log(`[autoplay] Skipping epic #${ticket.github_issue_number} from review queue (${epicInfo.reason})`);
+      return false;
+    }
+    return true;
+  });
 
   if (triageTickets.length === 0) {
     return;
@@ -149,8 +159,14 @@ async function autoStartReadyTickets(): Promise<void> {
     return;
   }
 
-  // Filter out blocked tickets and epics
+  // Filter out blocked tickets, epics, and paused tickets
   const unblockedTickets = readyTickets.filter(ticket => {
+    // Skip paused tickets - user has manually paused them
+    if (ticket.paused) {
+      console.log(`[autoplay] Skipping paused ticket #${ticket.github_issue_number}${ticket.pause_reason ? ` (${ticket.pause_reason})` : ''}`);
+      return false;
+    }
+
     // Skip epics - they should not be worked on directly
     if (shouldSkipForWork(ticket)) {
       const epicInfo = detectEpic(ticket);
@@ -167,7 +183,7 @@ async function autoStartReadyTickets(): Promise<void> {
   });
 
   if (unblockedTickets.length === 0) {
-    console.log('[autoplay] All ready tickets are blocked or are epics, waiting');
+    console.log('[autoplay] All ready tickets are blocked, paused, or are epics, waiting');
     return;
   }
 

@@ -78,7 +78,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <input
                 type="range"
                 min="1"
-                max="5"
+                max="10"
                 value={maxAgentSlots}
                 onChange={(e) => setMaxAgentSlots(parseInt(e.target.value))}
                 className="flex-1 accent-blue-500"
@@ -89,7 +89,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
             <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>1</span>
-              <span>5</span>
+              <span>10</span>
             </div>
           </div>
 

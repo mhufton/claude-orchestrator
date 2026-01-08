@@ -1,0 +1,90 @@
+#!/bin/bash
+#
+# queue-run - Wrapper script for serializing heavy operations (test/build/lint)
+#
+# This script ensures only one heavy operation runs at a time across all agents
+# by coordinating through the orchestrator's queue API.
+#
+# Usage: queue-run <type> <command...>
+#   type: test, build, lint, or any identifier
+#   command: the actual command to run
+#
+# Example: queue-run test npm test
+#          queue-run build npm run build
+#          queue-run lint npm run lint
+#
+# Environment:
+#   ORCHESTRATOR_URL: Base URL of orchestrator (default: http://localhost:3456)
+#   WORKTREE_SLOT: Override slot number detection
+#
+
+set -e
+
+ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:3456}"
+
+# Parse arguments
+if [ $# -lt 2 ]; then
+    echo "Usage: queue-run <type> <command...>"
+    echo "Example: queue-run test npm test"
+    exit 1
+fi
+
+COMMAND_TYPE="$1"
+shift
+COMMAND="$*"
+
+# Determine slot number from current directory or environment
+if [ -n "$WORKTREE_SLOT" ]; then
+    SLOT="$WORKTREE_SLOT"
+else
+    # Try to extract slot from path like /path/to/worktrees/slot-3/...
+    SLOT=$(pwd | grep -oE 'slot-[0-9]+' | grep -oE '[0-9]+' | head -1)
+    if [ -z "$SLOT" ]; then
+        # Fallback: use a default slot or process ID based hash
+        SLOT=$((($$ % 10) + 1))
+        echo "[queue-run] Warning: Could not detect slot from path, using slot $SLOT"
+    fi
+fi
+
+echo "[queue-run] Requesting queue slot (slot=$SLOT, type=$COMMAND_TYPE)..."
+
+# Request queue slot (this blocks until it's our turn)
+RESPONSE=$(curl -s -X POST "$ORCHESTRATOR_URL/api/queue/acquire" \
+    -H "Content-Type: application/json" \
+    -d "{\"slot\": $SLOT, \"type\": \"$COMMAND_TYPE\", \"command\": \"$COMMAND\"}")
+
+# Check if we got an error
+if echo "$RESPONSE" | grep -q '"error"'; then
+    ERROR=$(echo "$RESPONSE" | grep -oE '"error":"[^"]*"' | cut -d'"' -f4)
+    echo "[queue-run] Error acquiring queue slot: $ERROR"
+    exit 1
+fi
+
+# Extract the queue ID
+QUEUE_ID=$(echo "$RESPONSE" | grep -oE '"id":[0-9]+' | grep -oE '[0-9]+')
+WAITED_MS=$(echo "$RESPONSE" | grep -oE '"waitedMs":[0-9]+' | grep -oE '[0-9]+' | tail -1)
+
+if [ -z "$QUEUE_ID" ]; then
+    echo "[queue-run] Error: Could not get queue ID from response"
+    echo "$RESPONSE"
+    exit 1
+fi
+
+echo "[queue-run] Queue slot acquired (id=$QUEUE_ID, waited=${WAITED_MS}ms)"
+echo "[queue-run] Running: $COMMAND"
+
+# Run the actual command, capturing exit code
+set +e
+$COMMAND
+EXIT_CODE=$?
+set -e
+
+# Release the queue slot
+echo "[queue-run] Releasing queue slot..."
+curl -s -X POST "$ORCHESTRATOR_URL/api/queue/release" \
+    -H "Content-Type: application/json" \
+    -d "{\"id\": $QUEUE_ID}" > /dev/null
+
+echo "[queue-run] Done (exit code: $EXIT_CODE)"
+
+exit $EXIT_CODE

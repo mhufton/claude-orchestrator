@@ -27,6 +27,8 @@ export interface Ticket {
   position: number;
   blocked_by?: number[];  // Ticket IDs that block this ticket
   blocks?: number[];      // Ticket IDs that this ticket blocks
+  paused: boolean;
+  pause_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -122,6 +124,8 @@ export type ServerMessage =
   | { type: 'batch_review_started'; ticketIds: number[] }
   | { type: 'review_progress'; results: Array<{ ticketId: number; verdict: string; error?: string }>; completed: number; total: number }
   | { type: 'review_output'; content: string }
+  | { type: 'ticket_paused'; ticketId: number }
+  | { type: 'ticket_resumed'; ticketId: number }
   | { type: 'error'; message: string };
 
 export interface PRDetails {
@@ -171,7 +175,9 @@ export type ClientMessage =
   | { type: 'enable_autoplay' }
   | { type: 'disable_autoplay' }
   | { type: 'update_settings'; settings: Record<string, unknown> }
-  | { type: 'batch_review'; ticketIds: number[]; issueNumbers: number[] };
+  | { type: 'batch_review'; ticketIds: number[]; issueNumbers: number[] }
+  | { type: 'pause_ticket'; ticketId: number; reason?: string }
+  | { type: 'resume_ticket'; ticketId: number };
 
 // Agent Todo items (from Claude's TodoWrite tool)
 export interface AgentTodo {

@@ -24,6 +24,8 @@ export interface Ticket {
   priority: Priority;
   position: number;
   handoff_notes: string | null;
+  paused: number;  // SQLite uses 0/1 for boolean
+  pause_reason: string | null;
   created_at: string;
   updated_at: string;
 }

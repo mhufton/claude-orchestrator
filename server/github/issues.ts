@@ -4,6 +4,7 @@ import { broadcastTicketCreated, broadcastTicketUpdated, broadcast } from '../ws
 import { recordIssueSyncStart, addActivity, setIssueSyncInterval } from '../poll-status';
 
 const CLAUDE_REVIEW_LABEL = 'claude-review';
+const EPIC_LABEL = 'epic';
 
 /**
  * Parse dependencies from issue body text
@@ -67,11 +68,19 @@ export async function syncIssues(readyLabel: string): Promise<{ added: number; u
   // Build a map of all issues we care about
   const allIssues = new Map<number, { issue: typeof readyIssues[0]; state: 'backlog' | 'needs_review' }>();
 
-  // Issues with claude-review go to needs_review state
+  // Issues with claude-review go to needs_review state (unless they're epics)
   for (const issue of reviewIssues) {
     const labelNames = issue.labels.map(l => l.name);
-    console.log(`[sync] Issue #${issue.number} has "${CLAUDE_REVIEW_LABEL}" label -> needs_review (labels: ${labelNames.join(', ')})`);
-    allIssues.set(issue.number, { issue, state: 'needs_review' });
+    const isEpic = issue.labels.some(l => l.name.toLowerCase() === EPIC_LABEL);
+
+    if (isEpic) {
+      // Epics skip triage - they go straight to backlog and are tracked separately
+      console.log(`[sync] Issue #${issue.number} is an EPIC, skipping triage -> backlog (labels: ${labelNames.join(', ')})`);
+      allIssues.set(issue.number, { issue, state: 'backlog' });
+    } else {
+      console.log(`[sync] Issue #${issue.number} has "${CLAUDE_REVIEW_LABEL}" label -> needs_review (labels: ${labelNames.join(', ')})`);
+      allIssues.set(issue.number, { issue, state: 'needs_review' });
+    }
   }
 
   // Issues with claude-ready (without claude-review) go to backlog

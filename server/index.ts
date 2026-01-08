@@ -1,5 +1,17 @@
 import { loadConfig } from './config';
-import { initDatabase, getAllTickets, getSlotStatus } from './db';
+import {
+  initDatabase,
+  getAllTickets,
+  getSlotStatus,
+  enqueueCommand,
+  getQueuePosition,
+  canStartCommand,
+  startCommand,
+  completeCommand,
+  cancelCommand,
+  getCommandQueueStatus,
+  cancelStaleCommands
+} from './db';
 import { initGitHubClient } from './github/client';
 import { startIssueSyncLoop } from './github/issues';
 import { startPRWatchLoop } from './github/pr-watcher';
@@ -74,7 +86,7 @@ console.log('Epic completion checker started (5 min interval)');
 const server = Bun.serve({
   port: config.server.port,
 
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
 
     // CORS headers for development
@@ -126,6 +138,92 @@ const server = Bun.serve({
         repoName: config.github.repo,
         claudeReadyLabel: config.github.claudeReadyLabel
       }, { headers: corsHeaders });
+    }
+
+    // Command queue API - for serializing heavy operations (test/build/lint)
+    if (url.pathname === '/api/queue/acquire' && req.method === 'POST') {
+      try {
+        const body = await req.json() as { slot: number; type: string; command: string };
+        const { slot, type, command } = body;
+
+        if (!slot || !type || !command) {
+          return Response.json(
+            { error: 'Missing required fields: slot, type, command' },
+            { status: 400, headers: corsHeaders }
+          );
+        }
+
+        // Clean up any stale commands first
+        cancelStaleCommands(30);
+
+        // Enqueue the command
+        const queued = enqueueCommand(slot, type, command);
+        console.log(`[queue] Command ${queued.id} enqueued: slot=${slot} type=${type}`);
+
+        // Poll until we can start (simple blocking approach)
+        const maxWaitMs = 600000; // 10 minute max wait
+        const pollIntervalMs = 1000; // Check every second
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < maxWaitMs) {
+          if (canStartCommand(queued.id)) {
+            startCommand(queued.id);
+            const position = 0;
+            console.log(`[queue] Command ${queued.id} started after ${Date.now() - startTime}ms`);
+            return Response.json(
+              { id: queued.id, status: 'running', position, waitedMs: Date.now() - startTime },
+              { headers: corsHeaders }
+            );
+          }
+
+          const position = getQueuePosition(queued.id);
+          // Wait before next poll
+          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+        }
+
+        // Timeout - cancel the command
+        cancelCommand(queued.id);
+        console.log(`[queue] Command ${queued.id} timed out after ${maxWaitMs}ms`);
+        return Response.json(
+          { error: 'Timeout waiting for queue slot', id: queued.id },
+          { status: 408, headers: corsHeaders }
+        );
+      } catch (error) {
+        console.error('[queue] Error in acquire:', error);
+        return Response.json(
+          { error: 'Internal server error' },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    }
+
+    if (url.pathname === '/api/queue/release' && req.method === 'POST') {
+      try {
+        const body = await req.json() as { id: number };
+        const { id } = body;
+
+        if (!id) {
+          return Response.json(
+            { error: 'Missing required field: id' },
+            { status: 400, headers: corsHeaders }
+          );
+        }
+
+        completeCommand(id);
+        console.log(`[queue] Command ${id} completed`);
+        return Response.json({ success: true, id }, { headers: corsHeaders });
+      } catch (error) {
+        console.error('[queue] Error in release:', error);
+        return Response.json(
+          { error: 'Internal server error' },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    }
+
+    if (url.pathname === '/api/queue/status') {
+      const status = getCommandQueueStatus();
+      return Response.json(status, { headers: corsHeaders });
     }
 
     // Serve static files in production (for now, just return 404)

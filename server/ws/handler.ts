@@ -9,6 +9,7 @@ import { parseReviewScore } from '../github/score-parser';
 import { getAllTicketTodos, stopAgent, spawnAgent, isAgentRunning } from '../agents/spawner';
 import { runBatchReview } from '../agents/reviewer';
 import { startAutoPlay, stopAutoPlay, isAutoPlayActive } from '../autoplay/loop';
+import { shouldSkipForWork, detectEpic } from '../epics/detector';
 import { getWorktreePath } from '../worktrees/manager';
 import { getPollStatus, getActivityLog } from '../poll-status';
 import type { Ticket, WorktreeSlot, TicketState } from '../state/types';
@@ -110,6 +111,57 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
       if (!result.success) {
         sendToClient(ws, { type: 'error', message: result.error });
       }
+      break;
+    }
+
+    case 'pause_ticket': {
+      const ticketId = message.ticketId as number;
+      const reason = message.reason as string | undefined;
+      const ticket = db.getTicketById(ticketId);
+
+      if (!ticket) {
+        sendToClient(ws, { type: 'error', message: 'Ticket not found' });
+        break;
+      }
+
+      console.log(`Pausing ticket ${ticketId}${reason ? `: ${reason}` : ''}`);
+
+      db.updateTicket(ticketId, {
+        paused: 1,
+        pause_reason: reason || null
+      });
+
+      broadcastTicketUpdated(ticketId, {
+        paused: 1,
+        pause_reason: reason || null
+      });
+
+      sendToClient(ws, { type: 'ticket_paused', ticketId });
+      break;
+    }
+
+    case 'resume_ticket': {
+      const ticketId = message.ticketId as number;
+      const ticket = db.getTicketById(ticketId);
+
+      if (!ticket) {
+        sendToClient(ws, { type: 'error', message: 'Ticket not found' });
+        break;
+      }
+
+      console.log(`Resuming ticket ${ticketId}`);
+
+      db.updateTicket(ticketId, {
+        paused: 0,
+        pause_reason: null
+      });
+
+      broadcastTicketUpdated(ticketId, {
+        paused: 0,
+        pause_reason: null
+      });
+
+      sendToClient(ws, { type: 'ticket_resumed', ticketId });
       break;
     }
 
@@ -648,18 +700,38 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
     }
 
     case 'batch_review': {
-      const ticketIds = message.ticketIds as number[];
-      const issueNumbers = message.issueNumbers as number[];
+      const requestedTicketIds = message.ticketIds as number[];
+      const requestedIssueNumbers = message.issueNumbers as number[];
 
-      if (!ticketIds || !Array.isArray(ticketIds) || ticketIds.length === 0) {
+      if (!requestedTicketIds || !Array.isArray(requestedTicketIds) || requestedTicketIds.length === 0) {
         sendToClient(ws, { type: 'error', message: 'No tickets selected for review' });
         break;
       }
 
-      if (!issueNumbers || !Array.isArray(issueNumbers) || issueNumbers.length !== ticketIds.length) {
+      if (!requestedIssueNumbers || !Array.isArray(requestedIssueNumbers) || requestedIssueNumbers.length !== requestedTicketIds.length) {
         sendToClient(ws, { type: 'error', message: 'Invalid issue numbers' });
         break;
       }
+
+      // Filter out epics - they don't need review
+      const filteredTickets: { id: number; issueNumber: number }[] = [];
+      for (let i = 0; i < requestedTicketIds.length; i++) {
+        const ticket = db.getTicketById(requestedTicketIds[i]);
+        if (ticket && shouldSkipForWork(ticket)) {
+          const epicInfo = detectEpic(ticket);
+          console.log(`[batch_review] Skipping epic #${requestedIssueNumbers[i]} (${epicInfo.reason})`);
+        } else {
+          filteredTickets.push({ id: requestedTicketIds[i], issueNumber: requestedIssueNumbers[i] });
+        }
+      }
+
+      if (filteredTickets.length === 0) {
+        sendToClient(ws, { type: 'error', message: 'All selected tickets are epics and cannot be reviewed' });
+        break;
+      }
+
+      const ticketIds = filteredTickets.map(t => t.id);
+      const issueNumbers = filteredTickets.map(t => t.issueNumber);
 
       console.log(`Batch review requested for ${ticketIds.length} tickets: issues #${issueNumbers.join(', #')}`);
 

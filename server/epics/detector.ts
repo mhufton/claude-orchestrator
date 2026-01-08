@@ -199,6 +199,23 @@ export async function checkAllEpicsCompletion(): Promise<void> {
 }
 
 /**
+ * Move any epics stuck in needs_review to backlog
+ * This handles epics that got into triage before we added filtering
+ */
+export function moveEpicsOutOfTriage(): void {
+  const triageTickets = db.getTicketsByState('needs_review');
+
+  for (const ticket of triageTickets) {
+    const epicInfo = detectEpic(ticket);
+    if (epicInfo.isEpic) {
+      console.log(`[epic] Moving epic #${ticket.github_issue_number} from needs_review to backlog (${epicInfo.reason})`);
+      db.updateTicket(ticket.id, { state: 'backlog' });
+      broadcastTicketUpdated(ticket.id, { state: 'backlog' });
+    }
+  }
+}
+
+/**
  * Start periodic epic completion checking
  */
 let epicCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -210,12 +227,18 @@ export function startEpicChecker(intervalMs: number = 300000): void { // Default
 
   console.log(`[epic] Starting epic completion checker (interval: ${intervalMs}ms)`);
 
-  // Run immediately
+  // Move any stuck epics out of triage immediately
+  moveEpicsOutOfTriage();
+
+  // Run completion check immediately
   checkAllEpicsCompletion().catch(err => {
     console.error('[epic] Epic check failed:', err);
   });
 
   epicCheckInterval = setInterval(() => {
+    // Also move epics out of triage periodically
+    moveEpicsOutOfTriage();
+
     checkAllEpicsCompletion().catch(err => {
       console.error('[epic] Epic check failed:', err);
     });
