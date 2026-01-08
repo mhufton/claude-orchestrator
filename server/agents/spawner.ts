@@ -67,6 +67,10 @@ function extractTodosFromEvent(event: unknown): AgentTodo[] | null {
 const runningAgents = new Map<number, Subprocess>();
 const agentSessionIds = new Map<number, string>();
 
+// Spawn lock: prevents race conditions where multiple systems try to spawn the same agent
+// This is a synchronous check - if spawn is in progress, skip
+const spawningAgents = new Set<number>();
+
 export interface AgentResult {
   success: boolean;
   exitCode: number | null;
@@ -210,6 +214,35 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     throw new Error('Ticket has no worktree slot assigned');
   }
 
+  // SPAWN LOCK: Prevent race conditions where multiple systems spawn the same agent
+  // This happens when stale-detector, spawner self-heal, and pr-watcher all detect
+  // "agent not running" at the same time
+  if (spawningAgents.has(ticket.id)) {
+    console.log(`[spawn-lock] Spawn already in progress for ticket #${ticket.github_issue_number}, skipping`);
+    return {
+      success: false,
+      exitCode: null,
+      prCreated: false,
+      prNumber: null
+    };
+  }
+
+  // Also check if agent is already running
+  if (runningAgents.has(ticket.id)) {
+    console.log(`[spawn-lock] Agent already running for ticket #${ticket.github_issue_number}, skipping`);
+    return {
+      success: false,
+      exitCode: null,
+      prCreated: false,
+      prNumber: null
+    };
+  }
+
+  // Acquire spawn lock
+  spawningAgents.add(ticket.id);
+  console.log(`[spawn-lock] Acquired lock for ticket #${ticket.github_issue_number}`);
+
+  try {
   // Pre-spawn checks: Don't spawn if issue is already resolved
   try {
     const issue = await getIssue(ticket.github_issue_number);
@@ -696,6 +729,11 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     prCreated,
     prNumber
   };
+  } finally {
+    // Release spawn lock
+    spawningAgents.delete(ticket.id);
+    console.log(`[spawn-lock] Released lock for ticket #${ticket.github_issue_number}`);
+  }
 }
 
 async function checkForPR(ticket: Ticket): Promise<{ prCreated: boolean; prNumber: number | null; actualBranch?: string }> {
