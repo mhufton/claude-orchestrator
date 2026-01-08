@@ -152,22 +152,12 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       return { action: 'waiting', reason: 'Checking mergeability...' };
     }
 
-    // Check if branch is behind main (but no conflicts)
-    // Auto-update via API first - no agent needed for simple behind state
+    // Branch is behind main but no conflicts - just proceed to merge
+    // With strict:false in branch protection, squash merge handles this automatically
+    // No need to update branch and trigger unnecessary CI reruns
     if (pr.mergeable_state === 'behind') {
-      console.log(`PR #${ticket.pr_number}: Branch is behind main, attempting auto-update...`);
-      const updateResult = await github.updatePRBranch(ticket.pr_number);
-
-      if (updateResult.success) {
-        // Branch updated successfully, wait for CI to re-run
-        console.log(`PR #${ticket.pr_number}: Branch updated successfully, waiting for CI`);
-        return { action: 'waiting', reason: 'Branch updated to latest main, waiting for CI' };
-      } else if (updateResult.message.includes('conflict')) {
-        // Update failed due to conflicts - respawn agent to handle
-        console.log(`PR #${ticket.pr_number}: Auto-update failed due to conflicts, respawning agent`);
-        return await respawnForIssue(ticket, 'resolving_merge_conflict', ['Merge conflicts detected during auto-update']);
-      }
-      // Other failures: continue, agent may need to handle
+      console.log(`PR #${ticket.pr_number}: Behind main but no conflicts, proceeding to merge check`);
+      // Fall through to CI check and merge logic
     }
 
     // Check for merge conflicts - respawn immediately, don't wait for CI
@@ -302,19 +292,11 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       console.log(`PR #${ticket.pr_number}: mergeable=${currentPR.mergeable}, mergeable_state=${currentPR.mergeable_state}`);
 
       // Handle based on actual state
+      // With strict:false, being behind shouldn't block merge - something else is wrong
       if (currentPR.mergeable_state === 'behind') {
-        // Branch is behind main - try to auto-update
-        console.log(`PR #${ticket.pr_number}: Branch is behind main, attempting auto-update...`);
-        const updateResult = await github.updatePRBranch(ticket.pr_number);
-
-        if (updateResult.success) {
-          // Branch updated - wait for CI to re-run, then we'll try merge again
-          return { action: 'waiting', reason: 'Branch updated to latest main, waiting for CI to re-run' };
-        } else {
-          // Update failed - likely conflicts emerged during update
-          console.log(`PR #${ticket.pr_number}: Auto-update failed: ${updateResult.message}`);
-          // Fall through to conflict handling
-        }
+        console.log(`PR #${ticket.pr_number}: Behind main but merge failed - will retry merge directly`);
+        // Don't update branch (triggers CI rerun), just wait and retry merge
+        return { action: 'waiting', reason: 'Merge failed while behind main - will retry' };
       }
 
       if (currentPR.mergeable === false || currentPR.mergeable_state === 'dirty') {
