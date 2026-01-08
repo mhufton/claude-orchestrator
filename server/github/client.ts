@@ -260,6 +260,54 @@ export async function getPRsForIssue(issueNumber: number): Promise<GitHubPR[]> {
   }
 }
 
+/**
+ * Search for PRs that reference ALL of the specified issue numbers.
+ * Used for batch PRs that close multiple issues.
+ */
+export async function getPRsForMultipleIssues(issueNumbers: number[]): Promise<GitHubPR[]> {
+  if (issueNumbers.length === 0) return [];
+
+  try {
+    // Search for open PRs that reference the first issue (as a starting filter)
+    const searchResponse = await octokit.search.issuesAndPullRequests({
+      q: `repo:${owner}/${repo} is:pr is:open ${issueNumbers[0]} in:body`,
+      sort: 'updated',
+      order: 'desc',
+      per_page: 10
+    });
+
+    // Filter to PRs that close ALL the specified issues
+    const prs = searchResponse.data.items.filter(item => {
+      const body = (item.body || '').toLowerCase();
+      const title = (item.title || '').toLowerCase();
+      const combined = body + ' ' + title;
+
+      // Check that ALL issue numbers are referenced with closing keywords
+      return issueNumbers.every(n => {
+        const pattern = new RegExp(`(closes|fixes|resolves)\\s*#${n}\\b`, 'i');
+        return pattern.test(combined);
+      });
+    });
+
+    // Fetch full PR data for each match
+    const fullPRs: GitHubPR[] = [];
+    for (const item of prs) {
+      try {
+        const pr = await getPR(item.number);
+        fullPRs.push(pr);
+      } catch {
+        // Skip if we can't fetch the full PR
+      }
+    }
+
+    console.log(`[github] Found ${fullPRs.length} PR(s) closing issues ${issueNumbers.map(n => `#${n}`).join(', ')}`);
+    return fullPRs;
+  } catch (error) {
+    console.error(`Error searching PRs for multiple issues:`, error);
+    return [];
+  }
+}
+
 export interface MergeResult {
   success: boolean;
   error?: string;

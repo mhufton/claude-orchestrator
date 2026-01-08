@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Bot, Users } from 'lucide-react';
+import { X, Bot, Users, Layers } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useTicketsStore } from '../stores/tickets';
 
@@ -14,6 +14,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   const [maxAgentSlots, setMaxAgentSlots] = useState(settings?.maxAgentSlots ?? 3);
   const [maxParallelReviews, setMaxParallelReviews] = useState(settings?.maxParallelReviews ?? 3);
+  const [batchingEnabled, setBatchingEnabled] = useState(settings?.batchingEnabled ?? true);
   const [isSaving, setIsSaving] = useState(false);
 
   // Sync local state when settings change
@@ -21,6 +22,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     if (settings) {
       setMaxAgentSlots(settings.maxAgentSlots);
       setMaxParallelReviews(settings.maxParallelReviews);
+      setBatchingEnabled(settings.batchingEnabled ?? true);
     }
   }, [settings]);
 
@@ -33,6 +35,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       settings: {
         maxAgentSlots,
         maxParallelReviews,
+        batchingEnabled,
       }
     });
     // Close after a short delay to show feedback
@@ -119,6 +122,31 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <span>1</span>
               <span>10</span>
             </div>
+          </div>
+
+          {/* Batching */}
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Layers size={16} className="text-indigo-400" />
+                <label className="text-sm font-medium">Auto-Batch Related Tickets</label>
+              </div>
+              <button
+                onClick={() => setBatchingEnabled(!batchingEnabled)}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  batchingEnabled ? 'bg-indigo-600' : 'bg-gray-600'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                    batchingEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">
+              Automatically group related tickets by area into single PRs. When disabled, each ticket is processed individually.
+            </p>
           </div>
 
           {/* Note */}

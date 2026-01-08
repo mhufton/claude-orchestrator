@@ -1,8 +1,10 @@
 export type TicketState = 'needs_review' | 'backlog' | 'in_progress' | 'in_review' | 'done';
 
+export type BatchState = 'pending' | 'in_progress' | 'in_review' | 'done' | 'failed';
+
 export type RetryReason = 'addressing_pr_comments' | 'improving_score' | 'fixing_ci' | 'resolving_merge_conflict' | null;
 
-export type Priority = 'high' | 'medium' | 'low';
+export type Priority = 'urgent' | 'high' | 'medium' | 'low';
 
 export interface Ticket {
   id: number;
@@ -26,6 +28,24 @@ export interface Ticket {
   handoff_notes: string | null;
   paused: number;  // SQLite uses 0/1 for boolean
   pause_reason: string | null;
+  batch_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Batch {
+  id: number;
+  name: string | null;
+  area_key: string;
+  state: BatchState;
+  worktree_slot: number | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  branch_name: string | null;
+  current_score: number | null;
+  attempt_count: number;
+  needs_attention: number;  // SQLite uses 0/1 for boolean
+  attention_reason: string | null;
   created_at: string;
   updated_at: string;
 }

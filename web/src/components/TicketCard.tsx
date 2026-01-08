@@ -1,11 +1,17 @@
 import { useMemo, useState, useEffect } from 'react';
-import { ExternalLink, Play, RotateCcw, GitBranch, CheckCircle2, XCircle, Clock, Loader2, MessageSquare, TrendingUp, Wrench, Square, CheckSquare, Lock, Link2, Pause, PlayCircle } from 'lucide-react';
+import { ExternalLink, Play, RotateCcw, GitBranch, CheckCircle2, XCircle, Clock, Loader2, MessageSquare, TrendingUp, Wrench, Square, CheckSquare, Lock, Link2, Pause, PlayCircle, Layers } from 'lucide-react';
 import { useTicketsStore } from '../stores/tickets';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Ticket, RetryReason, Priority } from '../lib/types';
 
 function getPriorityInfo(priority: Priority): { icon: string; color: string; label: string } {
   switch (priority) {
+    case 'urgent':
+      return {
+        icon: '!!!',
+        color: 'bg-red-700 text-white animate-pulse',
+        label: 'URGENT - Displaces other tickets'
+      };
     case 'high':
       return {
         icon: '▲',
@@ -162,16 +168,27 @@ export function TicketCard({
   reviewResult
 }: TicketCardProps) {
   const labels = Array.isArray(ticket.labels) ? ticket.labels : [];
-  const [pendingAction, setPendingAction] = useState<'starting' | 'restarting' | null>(null);
+  const [pendingAction, setPendingAction] = useState<'starting' | 'restarting' | 'emergency_starting' | null>(null);
   const { send } = useWebSocket();
 
-  // Cycle priority: high -> medium -> low -> high
+  /// Cycle priority: urgent -> high, high -> medium -> low -> high
+  // Note: Cannot cycle INTO urgent via click - only de-escalate from urgent
   const cyclePriority = (e: React.MouseEvent) => {
     e.stopPropagation();
     const nextPriority: Priority =
+      ticket.priority === 'urgent' ? 'high' :  // De-escalate from urgent
       ticket.priority === 'high' ? 'medium' :
       ticket.priority === 'medium' ? 'low' : 'high';
     send({ type: 'set_priority', ticketId: ticket.id, priority: nextPriority });
+  };
+
+  // Emergency start - sets priority to urgent and starts immediately with displacement
+  const handleEmergencyStart = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirm(`Start ticket #${ticket.github_issue_number} as URGENT?\n\nThis will:\n- Set priority to urgent\n- Displace a running ticket if needed\n- Start work immediately`)) {
+      setPendingAction('emergency_starting');
+      send({ type: 'emergency_start', ticketId: ticket.id });
+    }
   };
 
   // Clear pending state when ticket state changes
@@ -231,6 +248,15 @@ export function TicketCard({
         </div>
       )}
 
+      {/* Urgent priority banner */}
+      {ticket.priority === 'urgent' && (
+        <div className="flex items-center gap-2 mb-2 px-2 py-1 bg-red-800/70 rounded text-red-200 text-xs animate-pulse">
+          <span className="text-sm font-bold">!!!</span>
+          <span className="font-bold">URGENT</span>
+          <span className="text-red-300">- Priority escalated, may displace other work</span>
+        </div>
+      )}
+
       {/* Paused banner */}
       {Boolean(ticket.paused) && !needsAttention && (
         <div className="flex items-center gap-2 mb-2 px-2 py-1 bg-yellow-900/50 rounded text-yellow-300 text-xs">
@@ -283,6 +309,14 @@ export function TicketCard({
              reviewResult.verdict === 'needs_revision' ? 'Revised' :
              reviewResult.verdict}
           </span>
+        </div>
+      )}
+
+      {/* Batch indicator */}
+      {ticket.batch_id && (
+        <div className="flex items-center gap-1.5 mb-2 px-2 py-1 bg-indigo-900/30 border-l-2 border-indigo-500 rounded-r text-xs text-indigo-300">
+          <Layers size={12} className="shrink-0" />
+          <span>Batched (ID: {ticket.batch_id})</span>
         </div>
       )}
 
@@ -555,6 +589,26 @@ export function TicketCard({
                 Force
               </button>
             )}
+            {/* Emergency button - start with urgent priority and displacement */}
+            {ticket.priority !== 'urgent' && (
+              <button
+                onClick={handleEmergencyStart}
+                disabled={pendingAction === 'emergency_starting'}
+                title="EMERGENCY: Start immediately with urgent priority, displacing other work if needed"
+                className={`
+                  flex items-center justify-center px-1.5 py-1 rounded text-xs
+                  ${pendingAction === 'emergency_starting'
+                    ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                    : 'text-gray-500 hover:text-red-400 hover:bg-red-900/30'}
+                `}
+              >
+                {pendingAction === 'emergency_starting' ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <span>!!!</span>
+                )}
+              </button>
+            )}
           </>
         )}
 
@@ -587,6 +641,35 @@ export function TicketCard({
           </button>
         )}
       </div>
+      )}
+
+      {/* Emergency button for needs_review tickets - skip review and start immediately */}
+      {ticket.state === 'needs_review' && ticket.priority !== 'urgent' && (
+        <div className="mt-2">
+          <button
+            onClick={handleEmergencyStart}
+            disabled={pendingAction === 'emergency_starting'}
+            title="EMERGENCY: Skip review, start immediately with urgent priority"
+            className={`
+              flex items-center justify-center gap-1 px-2 py-1 rounded text-xs
+              ${pendingAction === 'emergency_starting'
+                ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                : 'text-gray-500 hover:text-red-400 hover:bg-red-900/30'}
+            `}
+          >
+            {pendingAction === 'emergency_starting' ? (
+              <>
+                <Loader2 size={12} className="animate-spin" />
+                Starting...
+              </>
+            ) : (
+              <>
+                <span>!!!</span>
+                <span>Emergency</span>
+              </>
+            )}
+          </button>
+        </div>
       )}
     </div>
   );

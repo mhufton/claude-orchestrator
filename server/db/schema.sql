@@ -77,6 +77,24 @@ CREATE TABLE IF NOT EXISTS issue_reviews (
   FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
 );
 
+-- Batches (groups of related tickets worked on together)
+CREATE TABLE IF NOT EXISTS batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT,
+  area_key TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'in_progress', 'in_review', 'done', 'failed')),
+  worktree_slot INTEGER CHECK (worktree_slot IS NULL OR worktree_slot BETWEEN 1 AND 10),
+  pr_number INTEGER,
+  pr_url TEXT,
+  branch_name TEXT,
+  current_score INTEGER,
+  attempt_count INTEGER DEFAULT 0,
+  needs_attention INTEGER DEFAULT 0,
+  attention_reason TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Ticket dependencies (for blocking/dependency relationships)
 CREATE TABLE IF NOT EXISTS ticket_dependencies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,3 +148,6 @@ CREATE INDEX IF NOT EXISTS idx_command_queue_status ON command_queue(status);
 CREATE INDEX IF NOT EXISTS idx_command_queue_slot ON command_queue(slot);
 CREATE INDEX IF NOT EXISTS idx_state_transitions_ticket ON state_transitions(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON state_transitions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_batches_state ON batches(state);
+CREATE INDEX IF NOT EXISTS idx_batches_area_key ON batches(area_key);
+CREATE INDEX IF NOT EXISTS idx_tickets_batch_id ON tickets(batch_id);

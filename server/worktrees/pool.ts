@@ -7,7 +7,13 @@ export interface SlotAllocation {
   worktreePath: string;
 }
 
-export async function acquireSlot(ticketId: number, branchName: string): Promise<SlotAllocation | null> {
+export type EntityType = 'ticket' | 'batch';
+
+export async function acquireSlot(
+  entityId: number,
+  branchName: string,
+  entityType: EntityType = 'ticket'
+): Promise<SlotAllocation | null> {
   const availableSlot = db.getAvailableSlot();
 
   if (!availableSlot) {
@@ -19,11 +25,18 @@ export async function acquireSlot(ticketId: number, branchName: string): Promise
     // Create the worktree
     await createWorktree(availableSlot, branchName);
 
-    // Update ticket with slot assignment
-    db.updateTicket(ticketId, {
-      worktree_slot: availableSlot,
-      branch_name: branchName
-    });
+    // Update entity with slot assignment based on type
+    if (entityType === 'ticket') {
+      db.updateTicket(entityId, {
+        worktree_slot: availableSlot,
+        branch_name: branchName
+      });
+    } else if (entityType === 'batch') {
+      db.updateBatch(entityId, {
+        worktree_slot: availableSlot,
+        branch_name: branchName
+      });
+    }
 
     broadcastSlotStatus();
 

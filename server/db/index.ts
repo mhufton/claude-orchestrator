@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import type { Ticket, AgentLog, TicketState, ChatMessage } from '../state/types';
+import type { Ticket, AgentLog, TicketState, ChatMessage, Batch, BatchState } from '../state/types';
 
 let db: Database;
 
@@ -188,6 +188,70 @@ function runMigrations(): void {
     console.log('Migration complete: worktree_slot now supports up to 10 slots');
   }
 
+  // Migration: Add 'urgent' to priority CHECK constraint
+  // Re-fetch tableInfo in case it changed
+  const tableInfoForPriority = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='tickets'").get() as { sql: string } | undefined;
+  if (tableInfoForPriority && tableInfoForPriority.sql.includes("priority IN ('high', 'medium', 'low')") && !tableInfoForPriority.sql.includes("'urgent'")) {
+    console.log('Migrating database: adding urgent priority to CHECK constraint');
+
+    // Create new table with urgent priority
+    db.exec(`
+      CREATE TABLE tickets_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        github_issue_number INTEGER NOT NULL UNIQUE,
+        github_issue_url TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT,
+        labels TEXT DEFAULT '[]',
+        state TEXT NOT NULL DEFAULT 'backlog' CHECK (state IN ('needs_review', 'backlog', 'in_progress', 'in_review', 'done')),
+        worktree_slot INTEGER CHECK (worktree_slot IS NULL OR worktree_slot BETWEEN 1 AND 10),
+        pr_number INTEGER,
+        pr_url TEXT,
+        branch_name TEXT,
+        current_score INTEGER,
+        attempt_count INTEGER DEFAULT 0,
+        needs_attention INTEGER DEFAULT 0,
+        attention_reason TEXT,
+        retry_reason TEXT,
+        priority TEXT DEFAULT 'medium' CHECK (priority IN ('urgent', 'high', 'medium', 'low')),
+        position INTEGER DEFAULT 0,
+        handoff_notes TEXT,
+        paused INTEGER DEFAULT 0,
+        pause_reason TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Copy data from old table
+    db.exec(`
+      INSERT INTO tickets_new (
+        id, github_issue_number, github_issue_url, title, body, labels, state,
+        worktree_slot, pr_number, pr_url, branch_name, current_score,
+        attempt_count, needs_attention, attention_reason, retry_reason,
+        priority, position, handoff_notes, paused, pause_reason, created_at, updated_at
+      )
+      SELECT
+        id, github_issue_number, github_issue_url, title, body, labels, state,
+        worktree_slot, pr_number, pr_url, branch_name, current_score,
+        attempt_count, needs_attention, attention_reason, retry_reason,
+        priority, position, handoff_notes, paused, pause_reason, created_at, updated_at
+      FROM tickets
+    `);
+
+    // Drop old table and rename new one
+    db.exec('DROP TABLE tickets');
+    db.exec('ALTER TABLE tickets_new RENAME TO tickets');
+
+    // Recreate indexes
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_state ON tickets(state)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_issue_number ON tickets(github_issue_number)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_priority ON tickets(priority)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_position ON tickets(position)');
+
+    console.log('Migration complete: urgent priority now supported');
+  }
+
   // Migration: Create ticket_dependencies table
   const tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='ticket_dependencies'").all();
   if (tables.length === 0) {
@@ -205,6 +269,42 @@ function runMigrations(): void {
     `);
     db.exec('CREATE INDEX IF NOT EXISTS idx_dependencies_ticket ON ticket_dependencies(ticket_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON ticket_dependencies(depends_on_id)');
+  }
+
+  // Migration: Create batches table
+  const batchesTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='batches'").all();
+  if (batchesTable.length === 0) {
+    console.log('Migrating database: creating batches table');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        area_key TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'in_progress', 'in_review', 'done', 'failed')),
+        worktree_slot INTEGER CHECK (worktree_slot IS NULL OR worktree_slot BETWEEN 1 AND 10),
+        pr_number INTEGER,
+        pr_url TEXT,
+        branch_name TEXT,
+        current_score INTEGER,
+        attempt_count INTEGER DEFAULT 0,
+        needs_attention INTEGER DEFAULT 0,
+        attention_reason TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_batches_state ON batches(state)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_batches_area_key ON batches(area_key)');
+  }
+
+  // Migration: Add batch_id column to tickets
+  // Re-check columns after potential table recreations
+  const columnsAfterMigrations = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesAfter = new Set(columnsAfterMigrations.map(c => c.name));
+  if (!columnNamesAfter.has('batch_id')) {
+    console.log('Migrating database: adding batch_id column to tickets');
+    db.exec('ALTER TABLE tickets ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_batch_id ON tickets(batch_id)');
   }
 }
 
@@ -266,7 +366,7 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
     'state', 'worktree_slot', 'pr_number', 'pr_url',
     'branch_name', 'current_score', 'attempt_count', 'title', 'body', 'labels',
     'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position',
-    'handoff_notes', 'paused', 'pause_reason'
+    'handoff_notes', 'paused', 'pause_reason', 'batch_id'
   ];
 
   const updates: string[] = [];
@@ -580,6 +680,7 @@ export function getTicketsByStateOrdered(state: TicketState): Ticket[] {
     WHERE state = ?
     ORDER BY
       CASE priority
+        WHEN 'urgent' THEN 0
         WHEN 'high' THEN 1
         WHEN 'medium' THEN 2
         WHEN 'low' THEN 3
@@ -604,13 +705,15 @@ export interface OrchestratorSettings {
   maxParallelReviews: number;
   autoPlayEnabled: boolean;
   autoPlayIntervalMs: number;
+  batchingEnabled: boolean;
 }
 
 const DEFAULT_SETTINGS: OrchestratorSettings = {
   maxAgentSlots: 3,
   maxParallelReviews: 3,
   autoPlayEnabled: false,
-  autoPlayIntervalMs: 30000  // 30 seconds
+  autoPlayIntervalMs: 30000,  // 30 seconds
+  batchingEnabled: true       // Auto-batch related tickets by default
 };
 
 export function getSettings(): OrchestratorSettings {
@@ -868,4 +971,160 @@ export function cleanupOldTransitions(olderThanDays: number = 7): number {
   `).run(olderThanDays);
 
   return result.changes;
+}
+
+// ============================================
+// Urgent Priority Helpers
+// ============================================
+
+/**
+ * Get count of urgent tickets currently in_progress.
+ * Used to enforce max 1 urgent at a time.
+ */
+export function getUrgentInProgressCount(): number {
+  const result = db.query(`
+    SELECT COUNT(*) as count FROM tickets
+    WHERE state = 'in_progress' AND priority = 'urgent'
+  `).get() as { count: number };
+  return result.count;
+}
+
+/**
+ * Find the lowest-priority running ticket for displacement.
+ * Returns the ticket with lowest priority that's been running longest.
+ * Excludes urgent tickets (can't displace urgent with urgent).
+ */
+export function getLowestPriorityRunningTicket(): Ticket | null {
+  // Priority ordering: urgent=0, high=1, medium=2, low=3
+  // We want the highest number (lowest priority) first, then oldest updated_at
+  const ticket = db.query(`
+    SELECT * FROM tickets
+    WHERE state = 'in_progress'
+      AND priority != 'urgent'
+    ORDER BY
+      CASE priority
+        WHEN 'high' THEN 1
+        WHEN 'medium' THEN 2
+        WHEN 'low' THEN 3
+        ELSE 2
+      END DESC,
+      updated_at ASC
+    LIMIT 1
+  `).get() as Ticket | undefined;
+
+  return ticket || null;
+}
+
+/**
+ * Check if urgent ticket already exists in queue or in progress.
+ * Used to prevent multiple urgent tickets.
+ */
+export function hasUrgentTicketPending(): boolean {
+  const result = db.query(`
+    SELECT COUNT(*) as count FROM tickets
+    WHERE priority = 'urgent'
+      AND state IN ('backlog', 'in_progress')
+  `).get() as { count: number };
+  return result.count > 0;
+}
+
+// ============================================
+// Batch Operations
+// ============================================
+
+export interface CreateBatchInput {
+  area_key: string;
+  name?: string;
+}
+
+export function createBatch(input: CreateBatchInput): Batch {
+  const result = db.query(`
+    INSERT INTO batches (area_key, name)
+    VALUES (?, ?)
+  `).run(input.area_key, input.name || `Batch: ${input.area_key}`);
+
+  return getBatchById(Number(result.lastInsertRowid))!;
+}
+
+export function getBatchById(id: number): Batch | undefined {
+  return db.query('SELECT * FROM batches WHERE id = ?').get(id) as Batch | undefined;
+}
+
+export function getBatchesByState(state: BatchState): Batch[] {
+  return db.query('SELECT * FROM batches WHERE state = ? ORDER BY created_at ASC').all(state) as Batch[];
+}
+
+export function getAllBatches(): Batch[] {
+  return db.query('SELECT * FROM batches ORDER BY created_at DESC').all() as Batch[];
+}
+
+export function getTicketsInBatch(batchId: number): Ticket[] {
+  return db.query('SELECT * FROM tickets WHERE batch_id = ? ORDER BY id ASC').all(batchId) as Ticket[];
+}
+
+export function updateBatch(id: number, changes: Partial<Batch>): Batch | undefined {
+  const allowedFields = [
+    'name', 'area_key', 'state', 'worktree_slot', 'pr_number', 'pr_url',
+    'branch_name', 'current_score', 'attempt_count', 'needs_attention', 'attention_reason'
+  ];
+
+  const updates: string[] = [];
+  const values: unknown[] = [];
+
+  for (const [key, value] of Object.entries(changes)) {
+    if (allowedFields.includes(key)) {
+      updates.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+
+  if (updates.length === 0) return getBatchById(id);
+
+  updates.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(id);
+
+  const sql = `UPDATE batches SET ${updates.join(', ')} WHERE id = ?`;
+  db.query(sql).run(...values);
+
+  return getBatchById(id);
+}
+
+export function deleteBatch(id: number): boolean {
+  // First unassign all tickets from batch
+  db.query('UPDATE tickets SET batch_id = NULL WHERE batch_id = ?').run(id);
+  const result = db.query('DELETE FROM batches WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
+/**
+ * Get count of batches in active states (pending, in_progress, in_review)
+ */
+export function getActiveBatchCount(): number {
+  const result = db.query(`
+    SELECT COUNT(*) as count FROM batches
+    WHERE state IN ('pending', 'in_progress', 'in_review')
+  `).get() as { count: number };
+  return result.count;
+}
+
+/**
+ * Get tickets in backlog that are not part of any batch
+ */
+export function getUnbatchedBacklogTickets(): Ticket[] {
+  return db.query(`
+    SELECT * FROM tickets
+    WHERE state = 'backlog'
+      AND batch_id IS NULL
+      AND paused = 0
+    ORDER BY
+      CASE priority
+        WHEN 'urgent' THEN 0
+        WHEN 'high' THEN 1
+        WHEN 'medium' THEN 2
+        WHEN 'low' THEN 3
+        ELSE 2
+      END,
+      position ASC,
+      created_at ASC
+  `).all() as Ticket[];
 }

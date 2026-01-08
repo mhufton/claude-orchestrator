@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun';
 import * as db from '../db';
-import { startTicket, stopTicket, retryTicket, archiveTicket } from '../state/machine';
+import { startTicket, stopTicket, retryTicket, archiveTicket, displaceForUrgent } from '../state/machine';
 import { getPR, getPRComments, getPRReviewComments, getCheckStatus, addLabelToIssue, getBranchHeadSha } from '../github/client';
 import { syncIssues } from '../github/issues';
 import { loadConfig } from '../config';
@@ -897,10 +897,16 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
 
     case 'set_priority': {
       const ticketId = message.ticketId as number;
-      const priority = message.priority as 'high' | 'medium' | 'low';
+      const priority = message.priority as 'urgent' | 'high' | 'medium' | 'low';
 
-      if (!['high', 'medium', 'low'].includes(priority)) {
+      if (!['urgent', 'high', 'medium', 'low'].includes(priority)) {
         sendToClient(ws, { type: 'error', message: 'Invalid priority value' });
+        break;
+      }
+
+      // Check max 1 urgent limit
+      if (priority === 'urgent' && db.getUrgentInProgressCount() >= 1) {
+        sendToClient(ws, { type: 'error', message: 'Another urgent ticket is already in progress. Max 1 urgent allowed.' });
         break;
       }
 
@@ -913,6 +919,80 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
       db.updateTicket(ticketId, { priority });
       broadcastTicketUpdated(ticketId, { priority });
       console.log(`Set priority for ticket ${ticketId} to ${priority}`);
+      break;
+    }
+
+    case 'emergency_start': {
+      const ticketId = message.ticketId as number;
+      const ticket = db.getTicketById(ticketId);
+
+      if (!ticket) {
+        sendToClient(ws, { type: 'error', message: 'Ticket not found' });
+        break;
+      }
+
+      if (ticket.state !== 'backlog' && ticket.state !== 'needs_review') {
+        sendToClient(ws, { type: 'error', message: `Cannot emergency start ticket in state: ${ticket.state}` });
+        break;
+      }
+
+      // Check if another urgent is already running
+      if (db.getUrgentInProgressCount() >= 1) {
+        sendToClient(ws, {
+          type: 'error',
+          message: 'Another urgent ticket is already in progress. Max 1 urgent allowed.'
+        });
+        break;
+      }
+
+      console.log(`[emergency] Emergency start requested for ticket #${ticket.github_issue_number}`);
+
+      // Set priority to urgent and unpause if paused
+      db.updateTicket(ticketId, { priority: 'urgent', paused: 0, pause_reason: null });
+      broadcastTicketUpdated(ticketId, { priority: 'urgent', paused: 0, pause_reason: null });
+
+      // Move to backlog if in needs_review
+      if (ticket.state === 'needs_review') {
+        db.updateTicket(ticketId, { state: 'backlog' });
+        broadcastTicketUpdated(ticketId, { state: 'backlog' });
+      }
+
+      // Try to get a slot (with displacement if necessary)
+      let slot = db.getAvailableSlot();
+
+      if (!slot) {
+        // Displace lowest priority ticket
+        const displacement = await displaceForUrgent(ticketId);
+        if (displacement) {
+          slot = displacement.slot;
+        } else {
+          sendToClient(ws, {
+            type: 'error',
+            message: 'No slots available and no tickets eligible for displacement'
+          });
+          break;
+        }
+      }
+
+      // Start the ticket
+      const result = await startTicket(ticketId);
+      if (!result.success) {
+        sendToClient(ws, { type: 'error', message: result.error });
+      } else {
+        sendToClient(ws, {
+          type: 'emergency_started',
+          ticketId,
+          message: `Emergency ticket #${ticket.github_issue_number} started`
+        });
+        broadcast({
+          type: 'activity',
+          activity: {
+            timestamp: Date.now(),
+            type: 'agent_spawn',
+            message: `EMERGENCY: Started #${ticket.github_issue_number} with urgent priority`
+          }
+        });
+      }
       break;
     }
 

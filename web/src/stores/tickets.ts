@@ -12,6 +12,7 @@ interface OrchestratorSettings {
   maxParallelReviews: number;
   autoPlayEnabled: boolean;
   autoPlayIntervalMs: number;
+  batchingEnabled: boolean;
 }
 
 interface AutoplayStatus {
@@ -99,7 +100,8 @@ export const useTicketsStore = create<TicketsState>((set, get) => ({
     maxAgentSlots: 3,
     maxParallelReviews: 3,
     autoPlayEnabled: false,
-    autoPlayIntervalMs: 30000
+    autoPlayIntervalMs: 30000,
+    batchingEnabled: true
   },
   connected: false,
   selectedTicketId: null,
@@ -148,7 +150,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => ({
       : new Map(),
     pipelineStatus: pipelineStatus || { paused: false, reason: '', pausedAt: '' },
     autoplayStatus: autoplayStatus || { enabled: false, active: false, intervalMs: 30000 },
-    settings: settings || { maxAgentSlots: 3, maxParallelReviews: 3, autoPlayEnabled: false, autoPlayIntervalMs: 30000 },
+    settings: settings || { maxAgentSlots: 3, maxParallelReviews: 3, autoPlayEnabled: false, autoPlayIntervalMs: 30000, batchingEnabled: true },
     pollStatus: pollStatus || {
       prWatch: { lastRun: null, nextRun: null, intervalMs: 120000, ticketsChecked: 0 },
       issueSync: { lastRun: null, nextRun: null, intervalMs: 60000 }
@@ -490,6 +492,58 @@ export function handleServerMessage(message: ServerMessage): void {
         blocked_by: message.blockedBy,
         blocks: message.blocks
       });
+      break;
+    }
+
+    case 'batch_created': {
+      // Batch was created - update all tickets with their batch_id
+      console.log(`Batch ${message.batchId} created with tickets:`, message.ticketIds);
+      for (const ticketId of message.ticketIds) {
+        store.updateTicket(ticketId, { batch_id: message.batchId });
+      }
+      break;
+    }
+
+    case 'batch_started': {
+      // Batch started (or retrying) - refresh UI for all tickets in batch
+      console.log(`Batch ${message.batchId} started with tickets:`, message.ticketIds);
+      // The individual ticket_updated messages handle the actual updates
+      // This is just for logging/debugging
+      break;
+    }
+
+    case 'batch_completed': {
+      // Batch completed - all tickets move to done
+      console.log(`Batch ${message.batchId} completed`);
+      for (const ticketId of message.ticketIds) {
+        store.updateTicket(ticketId, { state: 'done', batch_id: null });
+      }
+      break;
+    }
+
+    case 'batch_failed': {
+      // Batch failed - tickets go back to backlog with attention flag
+      console.log(`Batch ${message.batchId} failed:`, message.reason);
+      for (const ticketId of message.ticketIds) {
+        store.updateTicket(ticketId, {
+          state: 'backlog',
+          needs_attention: true,
+          attention_reason: `Batch failed: ${message.reason}`
+        });
+      }
+      break;
+    }
+
+    case 'batch_in_review': {
+      // Batch is in review - update tickets with PR info
+      console.log(`Batch ${message.batchId} in review: PR #${message.prNumber}`);
+      for (const ticketId of message.ticketIds) {
+        store.updateTicket(ticketId, {
+          state: 'in_review',
+          pr_number: message.prNumber,
+          pr_url: message.prUrl
+        });
+      }
       break;
     }
 

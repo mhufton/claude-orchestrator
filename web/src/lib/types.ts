@@ -2,9 +2,11 @@
 
 export type TicketState = 'needs_review' | 'backlog' | 'in_progress' | 'in_review' | 'done';
 
+export type BatchState = 'pending' | 'in_progress' | 'in_review' | 'done' | 'failed';
+
 export type RetryReason = 'addressing_pr_comments' | 'improving_score' | 'fixing_ci' | 'resolving_merge_conflict' | null;
 
-export type Priority = 'high' | 'medium' | 'low';
+export type Priority = 'urgent' | 'high' | 'medium' | 'low';
 
 export interface Ticket {
   id: number;
@@ -29,6 +31,25 @@ export interface Ticket {
   blocks?: number[];      // Ticket IDs that this ticket blocks
   paused: boolean;
   pause_reason: string | null;
+  batch_id: number | null;  // ID of the batch this ticket belongs to
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Batch {
+  id: number;
+  name: string | null;
+  area_key: string;
+  state: BatchState;
+  worktree_slot: number | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  branch_name: string | null;
+  current_score: number | null;
+  attempt_count: number;
+  needs_attention: boolean;
+  attention_reason: string | null;
+  ticket_ids: number[];  // IDs of tickets in this batch
   created_at: string;
   updated_at: string;
 }
@@ -126,6 +147,11 @@ export type ServerMessage =
   | { type: 'review_output'; content: string }
   | { type: 'ticket_paused'; ticketId: number }
   | { type: 'ticket_resumed'; ticketId: number }
+  | { type: 'batch_created'; batchId: number; name: string; areaKey: string; ticketIds: number[] }
+  | { type: 'batch_started'; batchId: number; ticketIds: number[] }
+  | { type: 'batch_in_review'; batchId: number; prNumber: number; prUrl: string; ticketIds: number[] }
+  | { type: 'batch_completed'; batchId: number; ticketIds: number[] }
+  | { type: 'batch_failed'; batchId: number; reason: string; ticketIds: number[] }
   | { type: 'error'; message: string };
 
 export interface PRDetails {
@@ -177,7 +203,8 @@ export type ClientMessage =
   | { type: 'update_settings'; settings: Record<string, unknown> }
   | { type: 'batch_review'; ticketIds: number[]; issueNumbers: number[] }
   | { type: 'pause_ticket'; ticketId: number; reason?: string }
-  | { type: 'resume_ticket'; ticketId: number };
+  | { type: 'resume_ticket'; ticketId: number }
+  | { type: 'emergency_start'; ticketId: number };
 
 // Agent Todo items (from Claude's TodoWrite tool)
 export interface AgentTodo {

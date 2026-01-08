@@ -5,6 +5,7 @@ import { recordIssueSyncStart, addActivity, setIssueSyncInterval } from '../poll
 
 const CLAUDE_REVIEW_LABEL = 'claude-review';
 const EPIC_LABEL = 'epic';
+const EMERGENCY_LABEL = 'emergency';
 
 /**
  * Parse dependencies from issue body text
@@ -124,6 +125,18 @@ export async function syncIssues(readyLabel: string): Promise<{ added: number; u
       // Parse and add dependencies from issue body
       updateTicketDependencies(ticket.id, issue.body);
 
+      // Check for emergency label and set urgent priority
+      const hasEmergencyLabel = issue.labels.some(l => l.name.toLowerCase() === EMERGENCY_LABEL);
+      if (hasEmergencyLabel) {
+        if (!db.hasUrgentTicketPending()) {
+          db.updateTicket(ticket.id, { priority: 'urgent' });
+          console.log(`[sync] Issue #${issue.number} has emergency label, setting urgent priority`);
+        } else {
+          db.updateTicket(ticket.id, { priority: 'high' });
+          console.log(`[sync] Issue #${issue.number} has emergency label but urgent slot taken, using high priority`);
+        }
+      }
+
       broadcastTicketCreated(ticket);
       added++;
       console.log(`Added issue #${issue.number} to ${state}: ${issue.title}`);
@@ -135,6 +148,13 @@ export async function syncIssues(readyLabel: string): Promise<{ added: number; u
       if (existing.body !== issue.body) changes.body = issue.body;
       if (existing.labels !== labelsJson) changes.labels = labelsJson;
       if (existing.state !== state) changes.state = state;
+
+      // Check if emergency label was added and ticket should be escalated to urgent
+      const hasEmergencyLabel = issue.labels.some(l => l.name.toLowerCase() === EMERGENCY_LABEL);
+      if (hasEmergencyLabel && existing.priority !== 'urgent' && !db.hasUrgentTicketPending()) {
+        changes.priority = 'urgent';
+        console.log(`[sync] Escalating issue #${issue.number} to urgent (emergency label added)`);
+      }
 
       if (Object.keys(changes).length > 0) {
         console.log(`[sync] Updating issue #${issue.number}:`, Object.keys(changes).join(', '));
