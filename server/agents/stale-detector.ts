@@ -1,4 +1,5 @@
 import * as db from '../db';
+import { logStateTransition } from '../db';
 import { broadcastTicketUpdated } from '../ws/handler';
 import { isAgentRunning, spawnAgent } from './spawner';
 
@@ -89,17 +90,29 @@ async function checkForStaleAgents(): Promise<void> {
       const delayMs = backoffDelays[Math.min(ticket.attempt_count, backoffDelays.length - 1)];
       const delayDesc = delayMs >= 60000 ? `${delayMs / 60000}min` : `${delayMs / 1000}s`;
 
-      console.log(`[stale-detector] Agent for ticket #${ticket.github_issue_number} not running, respawning in ${delayDesc} (attempt ${ticket.attempt_count + 1}/${MAX_AUTO_RESTARTS})`);
+      const newAttemptCount = ticket.attempt_count + 1;
+      console.log(`[stale-detector] Agent for ticket #${ticket.github_issue_number} not running, respawning in ${delayDesc} (attempt ${newAttemptCount}/${MAX_AUTO_RESTARTS})`);
+
+      // Log state transition for debugging
+      logStateTransition(
+        ticket.id,
+        ticket.github_issue_number,
+        'attempt_count',
+        ticket.attempt_count,
+        newAttemptCount,
+        'stale-detector',
+        'agent process not running'
+      );
 
       db.updateTicket(ticket.id, {
-        attempt_count: ticket.attempt_count + 1,
+        attempt_count: newAttemptCount,
         retry_reason: 'agent_interrupted',
         needs_attention: 0,
         attention_reason: null
       });
 
       broadcastTicketUpdated(ticket.id, {
-        attempt_count: ticket.attempt_count + 1,
+        attempt_count: newAttemptCount,
         retry_reason: 'agent_interrupted',
         needs_attention: false,
         attention_reason: null

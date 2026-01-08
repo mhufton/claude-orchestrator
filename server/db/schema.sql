@@ -100,6 +100,20 @@ CREATE TABLE IF NOT EXISTS command_queue (
   completed_at TEXT
 );
 
+-- State transitions (detailed audit log for debugging retry issues)
+CREATE TABLE IF NOT EXISTS state_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL,
+  github_issue_number INTEGER NOT NULL,
+  field TEXT NOT NULL,
+  old_value TEXT,
+  new_value TEXT,
+  source TEXT NOT NULL,
+  reason TEXT,
+  timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_tickets_state ON tickets(state);
 CREATE INDEX IF NOT EXISTS idx_tickets_issue_number ON tickets(github_issue_number);
@@ -114,3 +128,5 @@ CREATE INDEX IF NOT EXISTS idx_dependencies_ticket ON ticket_dependencies(ticket
 CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON ticket_dependencies(depends_on_id);
 CREATE INDEX IF NOT EXISTS idx_command_queue_status ON command_queue(status);
 CREATE INDEX IF NOT EXISTS idx_command_queue_slot ON command_queue(slot);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_ticket ON state_transitions(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON state_transitions(timestamp);

@@ -1,5 +1,6 @@
 import * as github from './client';
 import * as db from '../db';
+import { logStateTransition, archiveTicketLogs } from '../db';
 import { parseReviewScore, getReviewFeedback } from './score-parser';
 import { broadcastTicketUpdated, broadcastSlotStatus, broadcastChatMessagesDelivered } from '../ws/handler';
 import { spawnAgent } from '../agents/spawner';
@@ -67,10 +68,23 @@ async function respawnForIssue(
     console.log(`Acquired slot ${slotToUse} for respawning ticket #${ticket.github_issue_number}`);
   }
 
+  const newAttemptCount = ticket.attempt_count + 1;
+
+  // Log state transition for debugging
+  logStateTransition(
+    ticket.id,
+    ticket.github_issue_number,
+    'attempt_count',
+    ticket.attempt_count,
+    newAttemptCount,
+    'pr-watcher',
+    `${reason}: ${issues.join(', ')}`
+  );
+
   db.updateTicket(ticket.id, {
     state: 'in_progress',
     worktree_slot: slotToUse,
-    attempt_count: ticket.attempt_count + 1,
+    attempt_count: newAttemptCount,
     retry_reason: reason,
     needs_attention: 0,
     attention_reason: null
@@ -78,7 +92,7 @@ async function respawnForIssue(
   broadcastTicketUpdated(ticket.id, {
     state: 'in_progress',
     worktree_slot: slotToUse,
-    attempt_count: ticket.attempt_count + 1,
+    attempt_count: newAttemptCount,
     retry_reason: reason,
     needs_attention: false,
     attention_reason: null
@@ -119,6 +133,13 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       });
       broadcastTicketUpdated(ticket.id, { state: 'done', worktree_slot: null });
       broadcastSlotStatus();
+
+      // Archive old logs to keep database lean (keep last 100 entries)
+      const archived = archiveTicketLogs(ticket.id, 100);
+      if (archived.deleted > 0) {
+        console.log(`[pr-watcher] Archived ${archived.deleted} old log entries for ticket #${ticket.github_issue_number}`);
+      }
+
       return { action: 'completed', reason: 'PR merged' };
     }
 
@@ -277,6 +298,12 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       });
       broadcastTicketUpdated(ticket.id, { state: 'done', worktree_slot: null });
       broadcastSlotStatus();
+
+      // Archive old logs to keep database lean (keep last 100 entries)
+      const archived = archiveTicketLogs(ticket.id, 100);
+      if (archived.deleted > 0) {
+        console.log(`[pr-watcher] Archived ${archived.deleted} old log entries for ticket #${ticket.github_issue_number}`);
+      }
 
       return {
         action: 'completed',

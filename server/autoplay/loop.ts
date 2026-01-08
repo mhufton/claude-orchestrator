@@ -1,4 +1,5 @@
 import * as db from '../db';
+import { logStateTransition } from '../db';
 import { spawnAgent, isAgentRunning } from '../agents/spawner';
 import { runBatchReview, isReviewRunning } from '../agents/reviewer';
 import { syncIssues } from '../github/issues';
@@ -200,11 +201,23 @@ async function autoStartReadyTickets(): Promise<void> {
       break;
     }
 
+    // Log the state transition for debugging
+    const newAttemptCount = (ticket.attempt_count || 0) + 1;
+    logStateTransition(
+      ticket.id,
+      ticket.github_issue_number,
+      'attempt_count',
+      ticket.attempt_count || 0,
+      newAttemptCount,
+      'autoplay',
+      'starting from backlog'
+    );
+
     // Update ticket state
     db.updateTicket(ticket.id, {
       state: 'in_progress',
       worktree_slot: slot,
-      attempt_count: (ticket.attempt_count || 0) + 1,
+      attempt_count: newAttemptCount,
       needs_attention: 0,
       attention_reason: null
     });
@@ -216,7 +229,7 @@ async function autoStartReadyTickets(): Promise<void> {
       changes: {
         state: 'in_progress',
         worktree_slot: slot,
-        attempt_count: (ticket.attempt_count || 0) + 1,
+        attempt_count: newAttemptCount,
         needs_attention: false,
         attention_reason: null
       }

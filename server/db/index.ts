@@ -763,3 +763,109 @@ export function cancelStaleCommands(olderThanMinutes: number = 30): number {
 
   return result.changes;
 }
+
+// ============================================
+// State Transition Logging (for debugging)
+// ============================================
+
+export type TransitionSource =
+  | 'autoplay'           // Starting from backlog
+  | 'stale-detector'     // Agent process died
+  | 'spawner-self-heal'  // Agent exited non-zero
+  | 'pr-watcher'         // CI failure, merge conflict, etc
+  | 'user-retry'         // Manual retry from UI
+  | 'user-message'       // User sent message, interrupted agent
+  | 'state-machine';     // Direct state machine call
+
+export interface StateTransition {
+  id: number;
+  ticket_id: number;
+  github_issue_number: number;
+  field: string;
+  old_value: string | null;
+  new_value: string | null;
+  source: TransitionSource;
+  reason: string | null;
+  timestamp: string;
+}
+
+/**
+ * Log a state transition for audit/debugging purposes.
+ * Call this whenever attempt_count, state, or other key fields change.
+ */
+export function logStateTransition(
+  ticketId: number,
+  issueNumber: number,
+  field: string,
+  oldValue: string | number | null,
+  newValue: string | number | null,
+  source: TransitionSource,
+  reason?: string
+): void {
+  db.query(`
+    INSERT INTO state_transitions (ticket_id, github_issue_number, field, old_value, new_value, source, reason)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    ticketId,
+    issueNumber,
+    field,
+    oldValue?.toString() ?? null,
+    newValue?.toString() ?? null,
+    source,
+    reason ?? null
+  );
+
+  // Also log to console for immediate visibility
+  console.log(`[state-transition] #${issueNumber}: ${field} ${oldValue}→${newValue} (source=${source}${reason ? `, reason=${reason}` : ''})`);
+}
+
+/**
+ * Get state transitions for a ticket (for debugging)
+ */
+export function getStateTransitions(ticketId: number, limit: number = 50): StateTransition[] {
+  return db.query(`
+    SELECT * FROM state_transitions
+    WHERE ticket_id = ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(ticketId, limit) as StateTransition[];
+}
+
+/**
+ * Archive/flush logs for a completed ticket.
+ * Moves agent_logs older than the retention period to a summary.
+ */
+export function archiveTicketLogs(ticketId: number, keepRecentCount: number = 100): { deleted: number; kept: number } {
+  // Count total logs
+  const total = db.query(`SELECT COUNT(*) as count FROM agent_logs WHERE ticket_id = ?`).get(ticketId) as { count: number };
+
+  if (total.count <= keepRecentCount) {
+    return { deleted: 0, kept: total.count };
+  }
+
+  // Delete oldest logs, keeping only the most recent ones
+  const result = db.query(`
+    DELETE FROM agent_logs
+    WHERE ticket_id = ?
+    AND id NOT IN (
+      SELECT id FROM agent_logs
+      WHERE ticket_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    )
+  `).run(ticketId, ticketId, keepRecentCount);
+
+  return { deleted: result.changes, kept: keepRecentCount };
+}
+
+/**
+ * Cleanup old state transitions (keep last N days)
+ */
+export function cleanupOldTransitions(olderThanDays: number = 7): number {
+  const result = db.query(`
+    DELETE FROM state_transitions
+    WHERE timestamp < datetime('now', '-' || ? || ' days')
+  `).run(olderThanDays);
+
+  return result.changes;
+}
