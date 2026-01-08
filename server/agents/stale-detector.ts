@@ -3,9 +3,33 @@ import { broadcastTicketUpdated } from '../ws/handler';
 import { isAgentRunning, spawnAgent } from './spawner';
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes for "stalled" detection
+const QUEUE_WAIT_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes max queue wait before flagging
 const CHECK_INTERVAL_MS = 30000; // Check every 30 seconds
 // No limit on auto-restart attempts - truly self-healing
 // The attempt_count is still tracked for visibility but doesn't block restarts
+
+// Check if a slot has a command waiting in the queue
+function getQueueStatusForSlot(slot: number): { waiting: boolean; position: number; waitingMs: number } | null {
+  const status = db.getCommandQueueStatus();
+
+  // Find any waiting or running command for this slot
+  const slotCommands = status.queue.filter(cmd => cmd.slot === slot);
+  if (slotCommands.length === 0) return null;
+
+  const waitingCmd = slotCommands.find(cmd => cmd.status === 'waiting');
+  if (!waitingCmd) return null;
+
+  // Calculate position in queue (how many ahead of this one)
+  const position = status.queue.filter(cmd =>
+    cmd.status === 'waiting' &&
+    new Date(cmd.requested_at).getTime() < new Date(waitingCmd.requested_at).getTime()
+  ).length;
+
+  // How long has it been waiting?
+  const waitingMs = Date.now() - new Date(waitingCmd.requested_at).getTime();
+
+  return { waiting: true, position, waitingMs };
+}
 
 export function startStaleAgentDetector(intervalMs: number = CHECK_INTERVAL_MS): void {
   setInterval(() => {
@@ -103,6 +127,38 @@ async function checkForStaleAgents(): Promise<void> {
 
     if (inactiveMs > STALE_THRESHOLD_MS) {
       const inactiveMinutes = Math.round(inactiveMs / 60000);
+
+      // Check if this agent is waiting in the command queue
+      if (ticket.worktree_slot) {
+        const queueStatus = getQueueStatusForSlot(ticket.worktree_slot);
+
+        if (queueStatus?.waiting) {
+          // Agent is waiting in queue - this is expected, not a stall
+          const queueMinutes = Math.round(queueStatus.waitingMs / 60000);
+
+          // Only flag if waiting excessively long (likely stuck)
+          if (queueStatus.waitingMs > QUEUE_WAIT_THRESHOLD_MS) {
+            const reason = `Agent waiting in queue for ${queueMinutes} minutes (position ${queueStatus.position + 1}) - may be stuck`;
+            console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: ${reason}`);
+
+            db.updateTicket(ticket.id, {
+              needs_attention: 1,
+              attention_reason: reason
+            });
+
+            broadcastTicketUpdated(ticket.id, {
+              needs_attention: true,
+              attention_reason: reason
+            });
+          } else {
+            // Normal queue wait - just log it, don't flag
+            console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: Waiting in queue (position ${queueStatus.position + 1}, ${queueMinutes}min) - not flagging as stalled`);
+          }
+          continue; // Skip normal stale handling
+        }
+      }
+
+      // Not waiting in queue - this is a real stall
       const reason = `Agent appears stalled - no activity for ${inactiveMinutes} minutes`;
 
       console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: ${reason}`);
