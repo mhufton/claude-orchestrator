@@ -193,7 +193,7 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
           });
           broadcastTicketUpdated(ticketId, {
             state: 'done',
-            needs_attention: false,
+            needs_attention: 0,
             attention_reason: null,
             worktree_slot: null
           });
@@ -209,7 +209,7 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
           });
           broadcastTicketUpdated(ticketId, {
             state: 'backlog',
-            needs_attention: false,
+            needs_attention: 0,
             attention_reason: null,
             worktree_slot: null
           });
@@ -222,7 +222,7 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
             attention_reason: null
           });
           broadcastTicketUpdated(ticketId, {
-            needs_attention: false,
+            needs_attention: 0,
             attention_reason: null
           });
           break;
@@ -371,7 +371,7 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
         branch_name: null,
         current_score: null,
         attempt_count: 0,
-        needs_attention: false,
+        needs_attention: 0,
         attention_reason: null,
         retry_reason: null
       });
@@ -1052,7 +1052,7 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
       } else {
         // Generic state change
         db.updateTicket(ticketId, { state: toState as TicketState, position: toIndex ?? 0 });
-        broadcastTicketUpdated(ticketId, { state: toState, position: toIndex ?? 0 });
+        broadcastTicketUpdated(ticketId, { state: toState as TicketState, position: toIndex ?? 0 });
       }
       break;
     }
@@ -1227,5 +1227,33 @@ export function broadcastChatMessagesDelivered(ticketId: number): void {
   broadcast({
     type: 'chat_messages_delivered',
     ticketId
+  });
+}
+
+export function broadcastMergeQueueUpdated(): void {
+  // Lazy import to avoid circular dependency
+  const { getMergeQueueStatus } = require('../db');
+  const status = getMergeQueueStatus();
+  broadcast({
+    type: 'merge_queue_updated',
+    ...status
+  });
+}
+
+export function broadcastMergeStarted(ticketId: number, prNumber: number): void {
+  broadcast({
+    type: 'merge_started',
+    ticketId,
+    prNumber
+  });
+}
+
+export function broadcastMergeCompleted(ticketId: number, prNumber: number, success: boolean, message?: string): void {
+  broadcast({
+    type: 'merge_completed',
+    ticketId,
+    prNumber,
+    success,
+    message
   });
 }

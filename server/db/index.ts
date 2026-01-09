@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import type { Ticket, AgentLog, TicketState, ChatMessage, Batch, BatchState } from '../state/types';
+import type { Ticket, AgentLog, TicketState, ChatMessage, Batch, BatchState, MergeQueueEntry, MergeQueueStatus } from '../state/types';
 
 let db: Database;
 
@@ -306,6 +306,45 @@ function runMigrations(): void {
     db.exec('ALTER TABLE tickets ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL');
     db.exec('CREATE INDEX IF NOT EXISTS idx_tickets_batch_id ON tickets(batch_id)');
   }
+
+  // Migration: Add CI status columns for live tracking
+  if (!columnNamesAfter.has('ci_status')) {
+    console.log('Migrating database: adding CI status columns');
+    db.exec("ALTER TABLE tickets ADD COLUMN ci_status TEXT CHECK (ci_status IN ('pending', 'running', 'passing', 'failing', 'unknown'))");
+    db.exec('ALTER TABLE tickets ADD COLUMN ci_checks TEXT');  // JSON array
+    db.exec('ALTER TABLE tickets ADD COLUMN ci_updated_at TEXT');
+  }
+
+  // Migration: Add merge queue columns to tickets
+  if (!columnNamesAfter.has('merge_queue_position')) {
+    console.log('Migrating database: adding merge queue columns');
+    db.exec('ALTER TABLE tickets ADD COLUMN merge_queue_position INTEGER');
+    db.exec('ALTER TABLE tickets ADD COLUMN merge_queue_priority INTEGER DEFAULT 0');
+  }
+
+  // Migration: Create merge_queue table
+  const mergeQueueTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='merge_queue'").all();
+  if (mergeQueueTable.length === 0) {
+    console.log('Migrating database: creating merge_queue table');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS merge_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        pr_number INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        priority INTEGER DEFAULT 0,
+        lane TEXT DEFAULT 'default',
+        status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'merging', 'merged', 'failed', 'removed')),
+        entered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        started_at TEXT,
+        completed_at TEXT,
+        failure_reason TEXT
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_status ON merge_queue(status)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_position ON merge_queue(position, lane)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_ticket ON merge_queue(ticket_id)');
+  }
 }
 
 export function getDatabase(): Database {
@@ -366,16 +405,18 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
     'state', 'worktree_slot', 'pr_number', 'pr_url',
     'branch_name', 'current_score', 'attempt_count', 'title', 'body', 'labels',
     'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position',
-    'handoff_notes', 'paused', 'pause_reason', 'batch_id'
+    'handoff_notes', 'paused', 'pause_reason', 'batch_id',
+    'ci_status', 'ci_checks', 'ci_updated_at',
+    'merge_queue_position', 'merge_queue_priority'
   ];
 
   const updates: string[] = [];
-  const values: unknown[] = [];
+  const values: (string | number | null)[] = [];
 
   for (const [key, value] of Object.entries(changes)) {
     if (allowedFields.includes(key)) {
       updates.push(`${key} = ?`);
-      values.push(value);
+      values.push(value as string | number | null);
     }
   }
 
@@ -1069,12 +1110,12 @@ export function updateBatch(id: number, changes: Partial<Batch>): Batch | undefi
   ];
 
   const updates: string[] = [];
-  const values: unknown[] = [];
+  const values: (string | number | null)[] = [];
 
   for (const [key, value] of Object.entries(changes)) {
     if (allowedFields.includes(key)) {
       updates.push(`${key} = ?`);
-      values.push(value);
+      values.push(value as string | number | null);
     }
   }
 
@@ -1127,4 +1168,291 @@ export function getUnbatchedBacklogTickets(): Ticket[] {
       position ASC,
       created_at ASC
   `).all() as Ticket[];
+}
+
+// ============================================
+// Merge Queue Operations
+// ============================================
+
+/**
+ * Add a PR to the merge queue
+ */
+export function addToMergeQueue(
+  ticketId: number,
+  prNumber: number,
+  priority: number = 0,
+  lane: string = 'default'
+): MergeQueueEntry {
+  // Get next position for this lane
+  const maxPos = db.query(`
+    SELECT MAX(position) as max_pos FROM merge_queue
+    WHERE lane = ? AND status IN ('waiting', 'merging')
+  `).get(lane) as { max_pos: number | null };
+
+  const position = (maxPos?.max_pos ?? -1) + 1;
+
+  const result = db.query(`
+    INSERT INTO merge_queue (ticket_id, pr_number, position, priority, lane, status, entered_at)
+    VALUES (?, ?, ?, ?, ?, 'waiting', CURRENT_TIMESTAMP)
+  `).run(ticketId, prNumber, position, priority, lane);
+
+  // Also update ticket's merge_queue_position
+  updateTicket(ticketId, { merge_queue_position: position, merge_queue_priority: priority });
+
+  return getMergeQueueEntryById(Number(result.lastInsertRowid))!;
+}
+
+/**
+ * Get a merge queue entry by ID
+ */
+export function getMergeQueueEntryById(id: number): MergeQueueEntry | undefined {
+  return db.query('SELECT * FROM merge_queue WHERE id = ?').get(id) as MergeQueueEntry | undefined;
+}
+
+/**
+ * Get a merge queue entry by ticket ID
+ */
+export function getMergeQueueEntryByTicketId(ticketId: number): MergeQueueEntry | undefined {
+  return db.query(`
+    SELECT * FROM merge_queue
+    WHERE ticket_id = ? AND status IN ('waiting', 'merging')
+    ORDER BY entered_at DESC LIMIT 1
+  `).get(ticketId) as MergeQueueEntry | undefined;
+}
+
+/**
+ * Get all active entries in the merge queue
+ */
+export function getMergeQueue(): MergeQueueEntry[] {
+  return db.query(`
+    SELECT * FROM merge_queue
+    WHERE status IN ('waiting', 'merging')
+    ORDER BY priority DESC, position ASC
+  `).all() as MergeQueueEntry[];
+}
+
+/**
+ * Get merge queue entries by status
+ */
+export function getMergeQueueByStatus(status: MergeQueueStatus): MergeQueueEntry[] {
+  return db.query(`
+    SELECT * FROM merge_queue
+    WHERE status = ?
+    ORDER BY priority DESC, position ASC
+  `).all(status) as MergeQueueEntry[];
+}
+
+/**
+ * Get the next entry ready to merge in a lane
+ */
+export function getNextToMerge(lane?: string): MergeQueueEntry | undefined {
+  // Check if anything is currently merging in this lane
+  const merging = db.query(`
+    SELECT * FROM merge_queue
+    WHERE status = 'merging'
+    ${lane ? "AND lane = ?" : ""}
+    LIMIT 1
+  `).get(...(lane ? [lane] : [])) as MergeQueueEntry | undefined;
+
+  if (merging) return undefined; // Something is already merging
+
+  // Get the highest priority waiting entry
+  return db.query(`
+    SELECT * FROM merge_queue
+    WHERE status = 'waiting'
+    ${lane ? "AND lane = ?" : ""}
+    ORDER BY priority DESC, position ASC
+    LIMIT 1
+  `).get(...(lane ? [lane] : [])) as MergeQueueEntry | undefined;
+}
+
+/**
+ * Start merging an entry
+ */
+export function startMerging(id: number): boolean {
+  const result = db.query(`
+    UPDATE merge_queue
+    SET status = 'merging', started_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'waiting'
+  `).run(id);
+
+  return result.changes > 0;
+}
+
+/**
+ * Mark a merge as completed successfully
+ */
+export function completeMerge(id: number): void {
+  const entry = getMergeQueueEntryById(id);
+  if (!entry) return;
+
+  db.query(`
+    UPDATE merge_queue
+    SET status = 'merged', completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+
+  // Clear ticket's merge queue position
+  updateTicket(entry.ticket_id, { merge_queue_position: null });
+}
+
+/**
+ * Mark a merge as failed
+ */
+export function failMerge(id: number, reason: string): void {
+  const entry = getMergeQueueEntryById(id);
+  if (!entry) return;
+
+  db.query(`
+    UPDATE merge_queue
+    SET status = 'failed', completed_at = CURRENT_TIMESTAMP, failure_reason = ?
+    WHERE id = ?
+  `).run(reason, id);
+
+  // Clear ticket's merge queue position
+  updateTicket(entry.ticket_id, { merge_queue_position: null });
+}
+
+/**
+ * Remove an entry from the queue (manual removal)
+ */
+export function removeFromMergeQueue(ticketId: number): boolean {
+  const entry = getMergeQueueEntryByTicketId(ticketId);
+  if (!entry) return false;
+
+  db.query(`
+    UPDATE merge_queue
+    SET status = 'removed', completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(entry.id);
+
+  // Clear ticket's merge queue position
+  updateTicket(ticketId, { merge_queue_position: null });
+
+  return true;
+}
+
+/**
+ * Update the priority of an entry
+ */
+export function setMergeQueuePriority(ticketId: number, priority: number): boolean {
+  const entry = getMergeQueueEntryByTicketId(ticketId);
+  if (!entry) return false;
+
+  db.query(`
+    UPDATE merge_queue SET priority = ? WHERE id = ?
+  `).run(priority, entry.id);
+
+  updateTicket(ticketId, { merge_queue_priority: priority });
+
+  return true;
+}
+
+/**
+ * Reorder an entry to a new position
+ */
+export function reorderMergeQueue(ticketId: number, newPosition: number): boolean {
+  const entry = getMergeQueueEntryByTicketId(ticketId);
+  if (!entry || entry.status !== 'waiting') return false;
+
+  const oldPosition = entry.position;
+  const lane = entry.lane;
+
+  if (newPosition === oldPosition) return true;
+
+  // Shift other entries
+  if (newPosition < oldPosition) {
+    // Moving up - shift entries down
+    db.query(`
+      UPDATE merge_queue
+      SET position = position + 1
+      WHERE lane = ? AND status = 'waiting'
+        AND position >= ? AND position < ?
+    `).run(lane, newPosition, oldPosition);
+  } else {
+    // Moving down - shift entries up
+    db.query(`
+      UPDATE merge_queue
+      SET position = position - 1
+      WHERE lane = ? AND status = 'waiting'
+        AND position > ? AND position <= ?
+    `).run(lane, oldPosition, newPosition);
+  }
+
+  // Update the entry's position
+  db.query(`
+    UPDATE merge_queue SET position = ? WHERE id = ?
+  `).run(newPosition, entry.id);
+
+  updateTicket(ticketId, { merge_queue_position: newPosition });
+
+  return true;
+}
+
+/**
+ * Get queue status for API/UI
+ */
+export function getMergeQueueStatus(): {
+  queue: MergeQueueEntry[];
+  lanes: string[];
+  currentlyMerging: MergeQueueEntry | null;
+  paused: boolean;
+} {
+  const queue = getMergeQueue();
+
+  // Get distinct lanes
+  const lanesResult = db.query(`
+    SELECT DISTINCT lane FROM merge_queue
+    WHERE status IN ('waiting', 'merging')
+  `).all() as { lane: string }[];
+
+  const currentlyMerging = db.query(`
+    SELECT * FROM merge_queue WHERE status = 'merging' LIMIT 1
+  `).get() as MergeQueueEntry | undefined;
+
+  // Check if queue is paused (stored in sync_state)
+  const pausedStr = getSyncState('merge_queue_paused');
+  const paused = pausedStr === 'true';
+
+  return {
+    queue,
+    lanes: lanesResult.map(r => r.lane),
+    currentlyMerging: currentlyMerging || null,
+    paused
+  };
+}
+
+/**
+ * Pause/resume the merge queue
+ */
+export function setMergeQueuePaused(paused: boolean): void {
+  setSyncState('merge_queue_paused', paused ? 'true' : 'false');
+}
+
+/**
+ * Check if merge queue is paused
+ */
+export function isMergeQueuePaused(): boolean {
+  return getSyncState('merge_queue_paused') === 'true';
+}
+
+/**
+ * Check if a ticket is already in the merge queue
+ */
+export function isInMergeQueue(ticketId: number): boolean {
+  const entry = getMergeQueueEntryByTicketId(ticketId);
+  return !!entry;
+}
+
+/**
+ * Clean up old completed/failed merge queue entries
+ */
+export function cleanupOldMergeQueueEntries(olderThanHours: number = 24): number {
+  const result = db.query(`
+    DELETE FROM merge_queue
+    WHERE status IN ('merged', 'failed', 'removed')
+    AND completed_at < datetime('now', '-' || ? || ' hours')
+  `).run(olderThanHours);
+
+  return result.changes;
 }

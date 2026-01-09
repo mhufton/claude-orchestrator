@@ -189,6 +189,31 @@ export async function getPR(prNumber: number): Promise<GitHubPR> {
   return response.data as unknown as GitHubPR;
 }
 
+export interface PRFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+}
+
+export async function getPRFiles(prNumber: number): Promise<PRFile[]> {
+  const response = await octokit.pulls.listFiles({
+    owner,
+    repo,
+    pull_number: prNumber,
+    per_page: 100
+  });
+
+  return response.data.map(f => ({
+    filename: f.filename,
+    status: f.status,
+    additions: f.additions,
+    deletions: f.deletions,
+    changes: f.changes
+  }));
+}
+
 export async function getPRsForBranch(branchName: string): Promise<GitHubPR[]> {
   const response = await octokit.pulls.list({
     owner,
@@ -348,11 +373,21 @@ export async function updatePRBranch(prNumber: number): Promise<{ success: boole
     return { success: true, message: 'Branch updated successfully' };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    // 422 typically means there are conflicts that need manual resolution
-    if (message.includes('422') || message.includes('conflict')) {
+
+    // "expected head sha didn't match" means the branch was updated by another process
+    // (branch-updater and pr-watcher racing, or agent pushed new commits)
+    // This is not a failure - just means we should check again on next cycle
+    if (message.includes("head sha didn't match") || message.includes("expected head sha")) {
+      console.log(`PR #${prNumber}: Branch state changed (likely already updated), will recheck`);
+      return { success: true, message: 'Branch state changed, will recheck' };
+    }
+
+    // 422 with "conflict" means actual merge conflicts that need resolution
+    if (message.includes('conflict')) {
       console.log(`PR #${prNumber} has conflicts that need manual resolution`);
       return { success: false, message: 'Conflicts need manual resolution' };
     }
+
     console.error(`Failed to update PR #${prNumber} branch:`, error);
     return { success: false, message };
   }
@@ -401,6 +436,7 @@ export interface PRReviewComment {
     login: string;
   };
   created_at: string;
+  in_reply_to_id?: number;
 }
 
 export async function getPRReviewComments(prNumber: number): Promise<PRReviewComment[]> {
@@ -548,8 +584,8 @@ export async function getUnrepliedBotComments(prNumber: number): Promise<PRRevie
   // Note: GitHub API includes in_reply_to_id on replies
   const repliedToIds = new Set(
     reviewComments
-      .filter(c => (c as { in_reply_to_id?: number }).in_reply_to_id)
-      .map(c => (c as { in_reply_to_id: number }).in_reply_to_id)
+      .filter(c => c.in_reply_to_id)
+      .map(c => c.in_reply_to_id!)
   );
 
   // Return bot comments that haven't been replied to
@@ -562,6 +598,7 @@ export async function getCheckStatus(sha: string): Promise<{
   pending: boolean;
   failures: CheckRun[];
   checksCompletedAt: Date | null;
+  checks: Array<{ name: string; status: string; conclusion: string | null }>;
 }> {
   // Try Check Runs API first (works with GitHub Apps and some PATs)
   try {
@@ -596,13 +633,20 @@ export async function getCheckStatus(sha: string): Promise<{
         }
       }
 
-      return { allPassed, pending, failures, checksCompletedAt };
+      // Map checks to simple format for UI display
+      const checksForUI = checks.map(c => ({
+        name: c.name,
+        status: c.status,
+        conclusion: c.conclusion
+      }));
+
+      return { allPassed, pending, failures, checksCompletedAt, checks: checksForUI };
     }
 
     // No checks registered yet for this SHA - treat as pending
     // This prevents acting on stale data when GitHub Actions hasn't started yet
     console.log(`No check runs found for SHA ${sha.slice(0, 7)} - treating as pending`);
-    return { allPassed: false, pending: true, failures: [], checksCompletedAt: null };
+    return { allPassed: false, pending: true, failures: [], checksCompletedAt: null, checks: [] };
   } catch (err) {
     // Check Runs API failed (likely permission issue), fall through to Status API
     console.log('Check Runs API unavailable, trying Commit Status API...');
@@ -621,7 +665,7 @@ export async function getCheckStatus(sha: string): Promise<{
     // If no statuses exist yet, treat as pending (same logic as above)
     if (status.statuses.length === 0) {
       console.log(`No commit statuses found for SHA ${sha.slice(0, 7)} - treating as pending`);
-      return { allPassed: false, pending: true, failures: [], checksCompletedAt: null };
+      return { allPassed: false, pending: true, failures: [], checksCompletedAt: null, checks: [] };
     }
 
     const pending = status.state === 'pending';
@@ -648,6 +692,8 @@ export async function getCheckStatus(sha: string): Promise<{
         name: s.context,
         status: 'completed' as const,
         conclusion: 'failure' as const,
+        html_url: s.target_url,
+        details_url: s.target_url,
         output: {
           title: s.description,
           summary: s.description,
@@ -655,7 +701,14 @@ export async function getCheckStatus(sha: string): Promise<{
         }
       }));
 
-    return { allPassed, pending, failures, checksCompletedAt };
+    // Map statuses to simple format for UI
+    const checksForUI = status.statuses.map(s => ({
+      name: s.context,
+      status: s.state === 'pending' ? 'in_progress' : 'completed',
+      conclusion: s.state === 'success' ? 'success' : (s.state === 'failure' || s.state === 'error' ? 'failure' : null)
+    }));
+
+    return { allPassed, pending, failures, checksCompletedAt, checks: checksForUI };
   } catch (statusErr) {
     console.error('Both Check Runs and Commit Status APIs failed:', statusErr);
     throw statusErr;

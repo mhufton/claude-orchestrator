@@ -173,8 +173,21 @@ export async function syncIssues(readyLabel: string): Promise<{ added: number; u
       } else {
         console.log(`[sync] Issue #${issue.number} unchanged (state: ${existing.state})`);
       }
+    } else if (existing.state === 'done') {
+      // Ticket was completed but still has labels - user wants to re-open it
+      console.log(`[sync] Re-opening done ticket #${issue.number} -> ${state} (labels still present)`);
+      db.updateTicket(existing.id, {
+        state,
+        attempt_count: 0,  // Reset attempt count for fresh start
+        needs_attention: 0,
+        attention_reason: null,
+        retry_reason: null
+      });
+      broadcastTicketUpdated(existing.id, { state });
+      updated++;
     } else {
-      console.log(`[sync] Issue #${issue.number} skipped - already in state "${existing.state}" (not backlog/needs_review)`);
+      // in_progress or in_review - don't touch active work
+      console.log(`[sync] Issue #${issue.number} skipped - already in state "${existing.state}" (active work)`);
     }
   }
 

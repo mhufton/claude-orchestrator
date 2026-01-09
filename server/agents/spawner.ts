@@ -7,6 +7,7 @@ import { broadcastAgentOutput, broadcastTicketUpdated, broadcastAgentTodos, broa
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForIssue, getIssue, getPR } from '../github/client';
 import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
+import { tryAcquireRespawnLock } from './respawn-coordinator';
 import type { Ticket } from '../state/types';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
@@ -151,6 +152,19 @@ async function continueAgentConversation(
 
   runningAgents.set(ticket.id, proc);
 
+  // Auto-clear needs_attention since agent is now running
+  if (ticket.needs_attention) {
+    console.log(`[agent] Auto-clearing needs_attention for #${ticket.github_issue_number} (batch agent started)`);
+    db.updateTicket(ticket.id, {
+      needs_attention: 0,
+      attention_reason: null
+    });
+    broadcastTicketUpdated(ticket.id, {
+      needs_attention: 0,
+      attention_reason: null
+    });
+  }
+
   // Stream stdout (same as main agent)
   const stdoutReader = proc.stdout.getReader();
   const decoder = new TextDecoder();
@@ -261,7 +275,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
       broadcastTicketUpdated(ticket.id, {
         state: 'done',
         worktree_slot: null,
-        needs_attention: false,
+        needs_attention: 0,
         attention_reason: null
       });
 
@@ -293,7 +307,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
       broadcastTicketUpdated(ticket.id, {
         state: 'done',
         worktree_slot: null,
-        needs_attention: false,
+        needs_attention: 0,
         attention_reason: null
       });
 
@@ -328,7 +342,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
         broadcastTicketUpdated(ticket.id, {
           state: 'done',
           worktree_slot: null,
-          needs_attention: false,
+          needs_attention: 0,
           attention_reason: null
         });
 
@@ -381,7 +395,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
       broadcastTicketUpdated(ticket.id, {
         state: 'backlog',
         worktree_slot: null,
-        needs_attention: true,
+        needs_attention: 1,
         attention_reason: `Worktree creation failed: ${createError instanceof Error ? createError.message : 'Unknown error'}`
       });
 
@@ -435,7 +449,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
           attention_reason: 'Worktree stuck and recovery failed - manual intervention needed'
         });
         broadcastTicketUpdated(ticket.id, {
-          needs_attention: true,
+          needs_attention: 1,
           attention_reason: 'Worktree stuck and recovery failed - manual intervention needed'
         });
 
@@ -542,6 +556,19 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
   });
 
   runningAgents.set(ticket.id, proc);
+
+  // Auto-clear needs_attention since agent is now running
+  if (ticket.needs_attention) {
+    console.log(`[agent] Auto-clearing needs_attention for #${ticket.github_issue_number} (agent started)`);
+    db.updateTicket(ticket.id, {
+      needs_attention: 0,
+      attention_reason: null
+    });
+    broadcastTicketUpdated(ticket.id, {
+      needs_attention: 0,
+      attention_reason: null
+    });
+  }
 
   // Stream stdout
   const stdoutReader = proc.stdout.getReader();
@@ -665,7 +692,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
       state: 'in_review',
       pr_number: prNumber,
       pr_url: `https://github.com/${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}/pull/${prNumber}`,
-      needs_attention: false,
+      needs_attention: 0,
       attention_reason: null,
       ...(actualBranch ? { branch_name: actualBranch } : {})
     });
@@ -675,6 +702,17 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
     if (exitCode !== 0 && ticket.attempt_count < MAX_AUTO_ATTEMPTS) {
       // Non-zero exit code - auto-respawn (self-healing)
+      // Check if another component already triggered a respawn
+      if (!tryAcquireRespawnLock(ticket.id, 'spawner:self-heal')) {
+        console.log(`[self-heal] Skipping respawn for ticket #${ticket.github_issue_number} - respawn already in progress`);
+        return {
+          success: false,
+          exitCode,
+          prCreated: false,
+          prNumber: null
+        };
+      }
+
       const nextAttempt = ticket.attempt_count + 1;
 
       // Exponential backoff: attempt 1 = 2s, attempt 2 = 30s, attempt 3 = 2min
@@ -715,7 +753,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
       });
 
       broadcastTicketUpdated(ticket.id, {
-        needs_attention: true,
+        needs_attention: 1,
         attention_reason: reason
       });
 

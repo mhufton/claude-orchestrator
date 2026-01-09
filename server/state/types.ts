@@ -2,9 +2,35 @@ export type TicketState = 'needs_review' | 'backlog' | 'in_progress' | 'in_revie
 
 export type BatchState = 'pending' | 'in_progress' | 'in_review' | 'done' | 'failed';
 
-export type RetryReason = 'addressing_pr_comments' | 'improving_score' | 'fixing_ci' | 'resolving_merge_conflict' | null;
+export type RetryReason = 'addressing_pr_comments' | 'improving_score' | 'fixing_ci' | 'resolving_merge_conflict' | 'agent_interrupted' | null;
 
 export type Priority = 'urgent' | 'high' | 'medium' | 'low';
+
+// CI status for live tracking
+export type CIStatus = 'pending' | 'running' | 'passing' | 'failing' | 'unknown';
+
+export interface CICheck {
+  name: string;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: 'success' | 'failure' | 'cancelled' | 'skipped' | null;
+}
+
+// Merge queue types
+export type MergeQueueStatus = 'waiting' | 'merging' | 'merged' | 'failed' | 'removed';
+
+export interface MergeQueueEntry {
+  id: number;
+  ticket_id: number;
+  pr_number: number;
+  position: number;
+  priority: number; // 0 = normal, 1 = high, 2 = urgent
+  lane: string; // 'default' or path-based lane
+  status: MergeQueueStatus;
+  entered_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  failure_reason: string | null;
+}
 
 export interface Ticket {
   id: number;
@@ -29,6 +55,13 @@ export interface Ticket {
   paused: number;  // SQLite uses 0/1 for boolean
   pause_reason: string | null;
   batch_id: number | null;
+  // CI status for live tracking
+  ci_status: CIStatus | null;
+  ci_checks: string | null;  // JSON array of CICheck
+  ci_updated_at: string | null;
+  // Merge queue
+  merge_queue_position: number | null;
+  merge_queue_priority: number;
   created_at: string;
   updated_at: string;
 }

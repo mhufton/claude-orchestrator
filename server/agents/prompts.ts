@@ -153,6 +153,14 @@ ${context.userMessages.join('\n')}
 `
     : '';
 
+  // Bot comments (from GitHub Actions, review bots, etc.)
+  const botCommentsSection = (context.botComments && context.botComments.length > 0)
+    ? `## Bot/CI comments:
+${context.botComments.join('\n\n')}
+
+`
+    : '';
+
   // Include handoff notes from database if available
   const handoffSection = ticket.handoff_notes
     ? `## Handoff Notes from Previous Attempt:
@@ -166,7 +174,7 @@ ${ticket.handoff_notes}
 
 This is attempt #${ticket.attempt_count}. A PR exists but has problems that need fixing.
 
-${problemsSection}${reviewFindingsSection}${commentsSection}${userMessagesSection}${handoffSection}## Investigate and fix
+${problemsSection}${reviewFindingsSection}${commentsSection}${botCommentsSection}${userMessagesSection}${handoffSection}## Investigate and fix
 
 Run these commands to understand the current state:
 

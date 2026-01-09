@@ -7,15 +7,16 @@ import type { Ticket } from '../state/types';
 const EPIC_LABELS = ['epic', 'parent', 'meta', 'tracking', 'umbrella'];
 
 // Patterns that indicate an epic (checkbox lists, sub-issue references)
+// NOTE: "depends on" and "blocked by" are NOT epic patterns - they indicate dependencies!
 const EPIC_PATTERNS = [
-  /##\s*(sub-?issues|child\s*issues|tasks|deliverables)/i,
-  /- \[ \] #\d+/,  // Checkbox with issue reference
-  /- \[x\] #\d+/i,  // Checked checkbox with issue reference
-  /depends on:?\s*#\d+/i,
-  /blocked by:?\s*#\d+/i,
-  /parent of:?\s*#\d+/i,
-  /tracks:?\s*(#\d+[,\s]*)+/i,
+  /##\s*(sub-?issues|child\s*issues|tasks)/i,  // Explicit sub-issue sections
+  /parent of:?\s*#\d+/i,  // Explicitly declares being a parent
+  /tracks:?\s*(#\d+[,\s]*){2,}/i,  // Tracks multiple issues (2+)
 ];
+
+// Patterns that require MULTIPLE matches to be considered an epic
+// A single checkbox with an issue ref is normal; 3+ is an epic
+const MULTI_CHECKBOX_PATTERN = /- \[[ xX]\] .*?#\d+/g;
 
 // Pattern to extract linked issue numbers from epic body
 const LINKED_ISSUE_PATTERN = /#(\d+)/g;
@@ -73,6 +74,15 @@ export function detectEpic(ticket: Ticket): EpicInfo {
     }
   }
 
+  // Check 3: Multiple checkbox items with issue references (3+ = epic)
+  if (!result.isEpic) {
+    const checkboxMatches = body.match(MULTI_CHECKBOX_PATTERN);
+    if (checkboxMatches && checkboxMatches.length >= 3) {
+      result.isEpic = true;
+      result.reason = `has ${checkboxMatches.length} checkbox items with issue references`;
+    }
+  }
+
   // Extract linked issues and checkboxes
   if (body) {
     // Find all checkbox items with issue references
@@ -86,19 +96,16 @@ export function detectEpic(ticket: Ticket): EpicInfo {
       }
     }
 
-    // Find other linked issues (not in checkboxes)
+    // Find other linked issues (not in checkboxes) - for epic completion tracking only
     const allLinked = [...body.matchAll(LINKED_ISSUE_PATTERN)].map(m => parseInt(m[1], 10));
     for (const num of allLinked) {
       if (!result.linkedIssues.includes(num)) {
         result.linkedIssues.push(num);
       }
     }
-
-    // If there are many linked issues (3+), likely an epic
-    if (result.linkedIssues.length >= 3 && !result.isEpic) {
-      result.isEpic = true;
-      result.reason = `references ${result.linkedIssues.length} other issues`;
-    }
+    // NOTE: We no longer auto-flag as epic just because it references 3+ issues
+    // Normal issues often reference related issues, dependencies, etc.
+    // Epic detection should be based on explicit labels or structural patterns only
   }
 
   return result;

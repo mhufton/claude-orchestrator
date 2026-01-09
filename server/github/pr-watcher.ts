@@ -6,6 +6,8 @@ import { broadcastTicketUpdated, broadcastSlotStatus, broadcastChatMessagesDeliv
 import { spawnAgent } from '../agents/spawner';
 import { acquireSlot } from '../worktrees/pool';
 import { recordPRWatchStart, recordPRWatchComplete, addActivity, setPRWatchInterval } from '../poll-status';
+import { tryAcquireRespawnLock } from '../agents/respawn-coordinator';
+import { addToQueue, isInQueue } from '../merge-queue/manager';
 import type { Ticket } from '../state/types';
 
 const SCORE_THRESHOLD = 90;
@@ -26,6 +28,46 @@ interface WatchResult {
 }
 
 /**
+ * Update CI status on a ticket for live tracking in the UI.
+ * This is called every time we check CI, so the UI always has current info.
+ *
+ * IMPORTANT: Auto-clears needs_attention when CI is running or passing,
+ * since that means work is progressing normally.
+ */
+function updateCIStatus(
+  ticket: Ticket,
+  status: 'pending' | 'running' | 'passing' | 'failing' | 'unknown',
+  checks: Array<{ name: string; status: string; conclusion: string | null }>
+): void {
+  const checksJson = JSON.stringify(checks.map(c => ({
+    name: c.name,
+    status: c.status,
+    conclusion: c.conclusion
+  })));
+
+  // Auto-clear needs_attention if CI is running or passing
+  // This prevents stale "stuck" flags when work is actually progressing
+  const shouldClearAttention = (status === 'running' || status === 'passing') && ticket.needs_attention;
+
+  const updates: Partial<Ticket> = {
+    ci_status: status,
+    ci_checks: checksJson,
+    ci_updated_at: new Date().toISOString()
+  };
+
+  if (shouldClearAttention) {
+    updates.needs_attention = 0;
+    updates.attention_reason = null;
+    console.log(`[pr-watcher] Auto-cleared needs_attention for #${ticket.github_issue_number} (CI ${status})`);
+  }
+
+  db.updateTicket(ticket.id, updates);
+
+  // Broadcast to UI
+  broadcastTicketUpdated(ticket.id, updates);
+}
+
+/**
  * Helper to respawn agent for a specific issue (merge conflicts, CI failures, etc.)
  * Extracted to avoid code duplication for early respawn cases
  */
@@ -34,6 +76,14 @@ async function respawnForIssue(
   reason: 'fixing_ci' | 'resolving_merge_conflict' | 'addressing_pr_comments' | 'improving_score',
   issues: string[]
 ): Promise<WatchResult> {
+  // Check if another component already triggered a respawn for this ticket
+  if (!tryAcquireRespawnLock(ticket.id, `pr-watcher:${reason}`)) {
+    return {
+      action: 'waiting',
+      reason: 'Respawn already in progress from another source'
+    };
+  }
+
   // CIRCUIT BREAKER: Check if we've exceeded max attempts
   if (ticket.attempt_count >= MAX_AUTO_ATTEMPTS) {
     console.log(`PR #${ticket.pr_number}: Maximum auto-attempts (${MAX_AUTO_ATTEMPTS}) reached. Flagging for human intervention.`);
@@ -43,7 +93,7 @@ async function respawnForIssue(
       attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
     });
     broadcastTicketUpdated(ticket.id, {
-      needs_attention: true,
+      needs_attention: 1,
       attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
     });
 
@@ -94,7 +144,7 @@ async function respawnForIssue(
     worktree_slot: slotToUse,
     attempt_count: newAttemptCount,
     retry_reason: reason,
-    needs_attention: false,
+    needs_attention: 0,
     attention_reason: null
   });
   broadcastSlotStatus();
@@ -173,31 +223,47 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       return { action: 'waiting', reason: 'Checking mergeability...' };
     }
 
-    // Branch is behind main but no conflicts - just proceed to merge
-    // With strict:false in branch protection, squash merge handles this automatically
-    // No need to update branch and trigger unnecessary CI reruns
+    // Branch is behind dev - update it directly without using an agent slot
+    // This is a lightweight operation that doesn't need a full agent
+    // IMPORTANT: Don't count this against attempt_count - it's mechanical, not a fix attempt
     if (pr.mergeable_state === 'behind') {
-      console.log(`PR #${ticket.pr_number}: Behind main but no conflicts, proceeding to merge check`);
-      // Fall through to CI check and merge logic
+      console.log(`PR #${ticket.pr_number}: Behind dev branch, updating directly (no agent needed)`);
+
+      const updateResult = await github.updatePRBranch(ticket.pr_number);
+
+      if (updateResult.success) {
+        console.log(`PR #${ticket.pr_number}: Branch updated successfully, waiting for CI to re-run`);
+        addActivity('branch_update', `Updated PR #${ticket.pr_number} branch to latest dev`);
+        return { action: 'waiting', reason: 'Branch updated, waiting for CI' };
+      } else {
+        // Update failed - likely has conflicts now, need an agent to resolve
+        console.log(`PR #${ticket.pr_number}: Branch update failed (${updateResult.message}), need agent to resolve`);
+        return await respawnForIssue(ticket, 'resolving_merge_conflict', [`Branch update failed: ${updateResult.message}`]);
+      }
     }
 
     // Check for merge conflicts - respawn immediately, don't wait for CI
     if (pr.mergeable === false) {
       console.log(`PR #${ticket.pr_number}: Has merge conflicts, respawning agent immediately`);
-      return await respawnForIssue(ticket, 'resolving_merge_conflict', ['Merge conflicts with main branch']);
+      return await respawnForIssue(ticket, 'resolving_merge_conflict', ['Merge conflicts with dev branch']);
     }
 
     // ==========================================
     // BRANCH IS CLEAN - NOW CHECK CI STATUS
     // ==========================================
 
-    let checkStatus: { pending: boolean; allPassed: boolean; failures: Array<{ name: string }>; checksCompletedAt: Date | null } | null = null;
+    let checkStatus: { pending: boolean; allPassed: boolean; failures: Array<{ name: string }>; checksCompletedAt: Date | null; checks?: Array<{ name: string; status: string; conclusion: string | null }> } | null = null;
     try {
       checkStatus = await github.getCheckStatus(pr.head.sha);
     } catch (checkError) {
       console.warn('Could not fetch check status:', checkError instanceof Error ? checkError.message : checkError);
+      updateCIStatus(ticket, 'unknown', []);
       return { action: 'waiting', reason: 'Cannot verify CI status - waiting' };
     }
+
+    // Update CI status in database for live tracking
+    const ciStatus = checkStatus.pending ? 'running' : (checkStatus.allPassed ? 'passing' : 'failing');
+    updateCIStatus(ticket, ciStatus, checkStatus.checks || []);
 
     if (checkStatus.pending) {
       console.log(`PR #${ticket.pr_number}: CI checks still pending`);
@@ -285,7 +351,27 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       }
     }
 
-    // Now merge the PR
+    // Add to merge queue instead of merging directly
+    // The merge queue processor will handle the actual merge in FIFO order
+    if (isInQueue(ticket.id)) {
+      console.log(`PR #${ticket.pr_number}: Already in merge queue, waiting`);
+      return { action: 'waiting', reason: 'In merge queue, waiting for turn' };
+    }
+
+    console.log(`PR #${ticket.pr_number}: Ready to merge (score ${score.total}/100), adding to merge queue`);
+    const queueEntry = await addToQueue(ticket.id, ticket.pr_number, ticket.merge_queue_priority);
+    addActivity('pr_check', `PR #${ticket.pr_number} added to merge queue (position ${queueEntry.position})`);
+
+    return {
+      action: 'waiting',
+      reason: `Added to merge queue at position ${queueEntry.position}`,
+      score: score.total
+    };
+
+    // NOTE: The code below handles merge failures, but since we now use the queue,
+    // merge failures are handled by the merge-queue/processor.ts
+    // Keeping this code commented for reference during transition
+    /*
     const mergeResult = await github.mergePR(ticket.pr_number);
 
     if (mergeResult.success) {
@@ -337,7 +423,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
             attention_reason: `Merge conflicts persist after ${ticket.attempt_count} attempts - needs manual resolution`
           });
           broadcastTicketUpdated(ticket.id, {
-            needs_attention: true,
+            needs_attention: 1,
             attention_reason: `Merge conflicts persist after ${ticket.attempt_count} attempts - needs manual resolution`
           });
           return { action: 'error', reason: 'Merge conflicts - max attempts reached' };
@@ -367,7 +453,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
           worktree_slot: slotToUse,
           attempt_count: ticket.attempt_count + 1,
           retry_reason: 'resolving_merge_conflict',
-          needs_attention: false,
+          needs_attention: 0,
           attention_reason: null
         });
         broadcastSlotStatus();
@@ -394,7 +480,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
             attention_reason: `PR blocked: requires human approval`
           });
           broadcastTicketUpdated(ticket.id, {
-            needs_attention: true,
+            needs_attention: 1,
             attention_reason: `PR blocked: requires human approval`
           });
           return { action: 'error', reason: 'Requires human approval' };
@@ -418,7 +504,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         attention_reason: `Merge failed: ${mergeResult.error || 'unknown reason'} (state: ${currentPR.mergeable_state})`
       });
       broadcastTicketUpdated(ticket.id, {
-        needs_attention: true,
+        needs_attention: 1,
         attention_reason: `Merge failed: ${mergeResult.error || 'unknown reason'} (state: ${currentPR.mergeable_state})`
       });
 
@@ -427,6 +513,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         reason: `Merge failed: ${mergeResult.error || 'unknown reason'}`
       };
     }
+    */
   } catch (error) {
     console.error(`Error watching PR for ticket ${ticket.id}:`, error);
     return {
@@ -462,14 +549,13 @@ export function startPRWatchLoop(intervalMs: number): void {
       }
     }
 
-    // ALSO check 'in_progress' tickets that have a PR but got stuck
+    // ALSO check 'in_progress' tickets that have a PR
     // This handles cases where the initial transition to 'in_review' failed
+    // NOTE: We check these even if needs_attention is set, so we can auto-clear
+    // the attention flag if CI is running/passing
     const inProgressTickets = db.getTicketsByState('in_progress');
     for (const ticket of inProgressTickets) {
-      // Skip if already flagged for attention
-      if (ticket.needs_attention) continue;
-
-      // If ticket has PR linked, process it
+      // If ticket has PR linked, process it (even if needs_attention is set)
       if (ticket.pr_number) {
         console.log(`[pr-watcher] Found in_progress ticket #${ticket.github_issue_number} with PR #${ticket.pr_number}, checking...`);
         const result = await watchTicketPR(ticket);

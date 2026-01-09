@@ -2,6 +2,7 @@ import * as db from '../db';
 import { logStateTransition } from '../db';
 import { broadcastTicketUpdated } from '../ws/handler';
 import { isAgentRunning, spawnAgent } from './spawner';
+import { tryAcquireRespawnLock } from './respawn-coordinator';
 
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes for "stalled" detection
 const QUEUE_WAIT_THRESHOLD_MS = 15 * 60 * 1000; // 15 minutes max queue wait before flagging
@@ -69,18 +70,36 @@ async function checkForStaleAgents(): Promise<void> {
 
     // FIRST: If process is NOT running, respawn (self-healing for crashes)
     if (!processRunning) {
+      // Check if another component (pr-watcher, spawner) already triggered a respawn
+      if (!tryAcquireRespawnLock(ticket.id, 'stale-detector')) {
+        console.log(`[stale-detector] Skipping ticket #${ticket.github_issue_number} - respawn already in progress`);
+        continue;
+      }
+
+      // SMART CHECK: Don't flag as stuck if there's work happening
+      // - CI is running or passing → work is progressing
+      // - PR exists → agent did its job, waiting for review/merge
+      const hasActiveCI = ticket.ci_status === 'running' || ticket.ci_status === 'passing';
+      const hasPR = ticket.pr_number !== null;
+
+      if (hasActiveCI || hasPR) {
+        console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: Agent not running but work in progress (CI: ${ticket.ci_status}, PR: ${ticket.pr_number ? '#' + ticket.pr_number : 'none'})`);
+        // Don't increment attempts or flag - just let pr-watcher handle it
+        continue;
+      }
+
       // Limit auto-restarts to prevent infinite loops on genuinely stuck tickets
-      // Unified with pr-watcher.ts and spawner.ts
       const MAX_AUTO_RESTARTS = 3;
       if (ticket.attempt_count >= MAX_AUTO_RESTARTS) {
-        console.log(`[stale-detector] Ticket #${ticket.github_issue_number} hit ${MAX_AUTO_RESTARTS} attempts, flagging for review`);
+        // Only flag if NO work is happening
+        console.log(`[stale-detector] Ticket #${ticket.github_issue_number} hit ${MAX_AUTO_RESTARTS} attempts with no PR, flagging for review`);
         db.updateTicket(ticket.id, {
           needs_attention: 1,
-          attention_reason: `Stuck after ${ticket.attempt_count} attempts - needs manual review`
+          attention_reason: `Stuck after ${ticket.attempt_count} attempts with no PR - needs manual review`
         });
         broadcastTicketUpdated(ticket.id, {
-          needs_attention: true,
-          attention_reason: `Stuck after ${ticket.attempt_count} attempts - needs manual review`
+          needs_attention: 1,
+          attention_reason: `Stuck after ${ticket.attempt_count} attempts with no PR - needs manual review`
         });
         continue;
       }
@@ -114,7 +133,7 @@ async function checkForStaleAgents(): Promise<void> {
       broadcastTicketUpdated(ticket.id, {
         attempt_count: newAttemptCount,
         retry_reason: 'agent_interrupted',
-        needs_attention: false,
+        needs_attention: 0,
         attention_reason: null
       });
 
@@ -168,7 +187,7 @@ async function checkForStaleAgents(): Promise<void> {
             });
 
             broadcastTicketUpdated(ticket.id, {
-              needs_attention: true,
+              needs_attention: 1,
               attention_reason: reason
             });
           } else {
@@ -190,7 +209,7 @@ async function checkForStaleAgents(): Promise<void> {
       });
 
       broadcastTicketUpdated(ticket.id, {
-        needs_attention: true,
+        needs_attention: 1,
         attention_reason: reason
       });
     }

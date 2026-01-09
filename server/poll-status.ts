@@ -31,7 +31,7 @@ const pollStatus: PollStatus = {
 // Activity log - last N activities
 const activityLog: Array<{
   timestamp: number;
-  type: 'pr_check' | 'issue_sync' | 'agent_spawn' | 'pr_merged' | 'ci_status' | 'respawn';
+  type: 'pr_check' | 'issue_sync' | 'agent_spawn' | 'pr_merged' | 'ci_status' | 'respawn' | 'branch_update' | 'merge_started' | 'merge_completed';
   message: string;
 }> = [];
 const MAX_ACTIVITY_LOG = 50;
@@ -63,7 +63,7 @@ export function recordIssueSyncStart(): void {
 }
 
 export function addActivity(
-  type: 'pr_check' | 'issue_sync' | 'agent_spawn' | 'pr_merged' | 'ci_status' | 'respawn',
+  type: 'pr_check' | 'issue_sync' | 'agent_spawn' | 'pr_merged' | 'ci_status' | 'respawn' | 'branch_update' | 'merge_started' | 'merge_completed',
   message: string
 ): void {
   activityLog.unshift({

@@ -182,8 +182,6 @@ export async function runBatchReview(
 }
 
 function buildCoordinatorPrompt(issueNumbers: number[], owner: string, repo: string): string {
-  const issueList = issueNumbers.join(', ');
-
   return `You are reviewing ${issueNumbers.length} GitHub issues in parallel using sub-agents.
 
 ## Issues to Review
@@ -313,10 +311,10 @@ async function runCoordinatorAgent(prompt: string): Promise<string> {
     }
   } finally {
     reader.releaseLock();
+    activeReviewProcess = null;
   }
 
   const exitCode = await proc.exited;
-  activeReviewProcess = null;
 
   if (exitCode !== 0) {
     const stderrReader = proc.stderr.getReader();

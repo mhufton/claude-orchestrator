@@ -149,7 +149,7 @@ export async function retryTicket(ticketId: number, command?: string): Promise<T
           });
 
           broadcastTicketUpdated(other.id, {
-            needs_attention: false,
+            needs_attention: 0,
             attention_reason: null
           });
 
@@ -213,7 +213,7 @@ export async function retryTicket(ticketId: number, command?: string): Promise<T
   broadcastTicketUpdated(ticketId, {
     state: 'in_progress',
     attempt_count: updatedTicket.attempt_count + 1,
-    needs_attention: false,
+    needs_attention: 0,
     attention_reason: null
   });
 
@@ -478,7 +478,7 @@ export async function failBatch(batchId: number, reason: string): Promise<BatchT
     broadcastTicketUpdated(ticket.id, {
       state: 'backlog',
       worktree_slot: null,
-      needs_attention: true,
+      needs_attention: 1,
       attention_reason: `Batch failed: ${reason}`
     });
 
@@ -550,7 +550,7 @@ export async function retryBatch(batchId: number): Promise<BatchTransitionResult
 
     // Broadcast full ticket update so UI refreshes for all tickets in batch
     broadcastTicketUpdated(ticket.id, {
-      needs_attention: false,
+      needs_attention: 0,
       attention_reason: null,
       state: 'backlog'  // Confirm state for UI
     });
