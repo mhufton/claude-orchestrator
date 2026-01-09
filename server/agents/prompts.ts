@@ -4,9 +4,9 @@ export function buildAgentPrompt(ticket: Ticket, context?: ReviewContext): strin
   const repoOwner = process.env.GITHUB_OWNER || 'OWNER';
   const repoName = process.env.GITHUB_REPO || 'REPO';
 
-  // For retries, use the investigation-first approach with known issues as hints
+  // For retries, use streamlined prompt with just the issues
   if (context && ticket.attempt_count > 1) {
-    return buildRetryPrompt(ticket, context, repoOwner, repoName);
+    return buildRetryPrompt(ticket, context);
   }
 
   // First attempt - full context prompt
@@ -94,10 +94,10 @@ IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases 
 }
 
 /**
- * Investigation-first retry prompt with known issues as hints
- * Simple statement of what's wrong (like a human would say it) + investigation commands
+ * Streamlined retry prompt - just the issues and minimal instructions
+ * The agent already knows how to use git/gh commands
  */
-function buildRetryPrompt(ticket: Ticket, context: ReviewContext, repoOwner: string, repoName: string): string {
+function buildRetryPrompt(ticket: Ticket, context: ReviewContext): string {
   // Build simple, direct statements about what's wrong (like a human would say)
   const problems: string[] = [];
 
@@ -161,11 +161,11 @@ ${context.botComments.join('\n\n')}
 `
     : '';
 
-  // Include handoff notes from database if available
+  // Include handoff notes from database if available (truncate to save tokens)
   const handoffSection = ticket.handoff_notes
     ? `## Handoff Notes from Previous Attempt:
 
-${ticket.handoff_notes}
+${ticket.handoff_notes.length > 500 ? ticket.handoff_notes.slice(0, 500) + '\n...[truncated]' : ticket.handoff_notes}
 
 `
     : '';
@@ -174,102 +174,14 @@ ${ticket.handoff_notes}
 
 This is attempt #${ticket.attempt_count}. A PR exists but has problems that need fixing.
 
-${problemsSection}${reviewFindingsSection}${commentsSection}${botCommentsSection}${userMessagesSection}${handoffSection}## Investigate and fix
+${problemsSection}${reviewFindingsSection}${commentsSection}${botCommentsSection}${userMessagesSection}${handoffSection}## Your task
 
-Run these commands to understand the current state:
+1. **Investigate** - Use \`git status\`, \`gh pr checks ${ticket.pr_number}\`, and \`gh run view <id> --log-failed\` to understand current state
+2. **Fix** - Address the issues above. Run \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\` locally before pushing
+3. **Push** - Commit with a descriptive message and push
+4. **Update handoff notes** - Write \`.claude-handoff.md\` with what you learned (don't commit it)
 
-### Check your git state
-\`\`\`bash
-git status                          # See current state, any uncommitted changes
-git log --oneline dev..HEAD         # See what commits you've made on this branch
-git diff dev --stat                 # See what files were changed
-\`\`\`
-
-### Check the PR status
-\`\`\`bash
-gh pr view ${ticket.pr_number}                    # See PR description, status, comments
-gh pr checks ${ticket.pr_number}                  # See which CI checks passed/failed
-gh pr view ${ticket.pr_number} --comments         # See all comments on the PR
-\`\`\`
-
-### If CI checks failed, get the actual error logs
-\`\`\`bash
-gh run list --limit 5                           # Find recent workflow runs
-gh run view <run-id> --log-failed               # See actual failure output
-\`\`\`
-
-### Check for merge conflicts
-\`\`\`bash
-git fetch origin dev
-git rebase origin/dev                           # This will show conflicts if any exist
-# If conflicts: resolve them, then git rebase --continue
-# If stuck: git rebase --abort to reset
-\`\`\`
-
-### Check for review comments on specific lines
-\`\`\`bash
-gh api repos/${repoOwner}/${repoName}/pulls/${ticket.pr_number}/comments | jq '.[] | {path: .path, line: .line, body: .body}'
-\`\`\`
-
-## STEP 2: FIX WHAT YOU FIND
-
-Based on your investigation:
-
-**If tests/lint/build failed:**
-1. Run the failing command locally: \`queue-run test npm test\` or \`queue-run lint npm run lint\` or \`queue-run build npm run build\`
-2. Read the error output carefully
-3. Fix the code
-4. Verify locally before pushing: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
-
-**If there are review comments:**
-1. Read each comment and understand what's being asked
-2. Make the requested changes
-3. Reply to confirm: \`gh api repos/${repoOwner}/${repoName}/pulls/${ticket.pr_number}/comments/<id>/replies -f body="Fixed"\`
-
-**If there are merge conflicts:**
-1. \`git fetch origin dev && git rebase origin/dev\`
-2. Resolve each conflict (remove <<<<<<< ======= >>>>>>> markers)
-3. \`git add <file>\` then \`git rebase --continue\`
-4. Force push: \`git push --force-with-lease\`
-
-**If you're stuck in a rebase:**
-1. Check state: \`git status\`
-2. If mid-rebase: either resolve and \`git rebase --continue\`, or \`git rebase --abort\` to start over
-3. If mid-merge: either resolve and \`git merge --continue\`, or \`git merge --abort\`
-
-## STEP 3: VERIFY AND PUSH
-
-Before pushing, ALWAYS verify (use queue-run to prevent resource contention):
-\`\`\`bash
-queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build
-\`\`\`
-
-If all pass, commit and push:
-\`\`\`bash
-git add -A
-git commit -m "fix: <describe what you fixed>"
-git push
-\`\`\`
-
-## STEP 4: Update Handoff Notes
-
-Before pushing, update \`.claude-handoff.md\` with what you learned/fixed:
-- What the issue was
-- How you fixed it
-- Any new gotchas discovered
-
-**IMPORTANT:** Do NOT commit this file. The orchestrator will capture it automatically.
-
-## KEY RULES
-
-- **Investigate before acting** - Don't guess, look at the actual errors
-- **PRs target dev branch** - Never push to main
-- **No "by Claude" in commits/PRs** - Keep it clean
-- **Run checks locally** - Don't push and hope, verify first
-- **Use queue-run** - Always use \`queue-run test/lint/build\` to prevent resource contention
-- **Update handoff notes** - Leave breadcrumbs for the next attempt (but don't commit the file)
-
-The answers are in the git history, CI logs, and PR comments. Go find them.
+PRs target dev branch. No "by Claude" in commits/PRs.
 `;
 }
 

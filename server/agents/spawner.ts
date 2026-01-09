@@ -104,10 +104,10 @@ function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
     return 'sonnet';
   }
 
-  // Default: sonnet for attempts 1-2, opus for 3+ to balance cost vs capability
-  // Sonnet with rich retry context can solve most issues - only escalate if truly stuck
-  if (ticket.attempt_count >= 3) {
-    console.log(`[model] Using opus for #${ticket.github_issue_number} (attempt ${ticket.attempt_count} >= 3, escalating after sonnet retries)`);
+  // Default: sonnet for attempts 1-3, opus for 4+ to balance cost vs capability
+  // With server restart protection, fewer false escalations - give Sonnet more chances
+  if (ticket.attempt_count >= 4) {
+    console.log(`[model] Using opus for #${ticket.github_issue_number} (attempt ${ticket.attempt_count} >= 4, escalating after sonnet retries)`);
     return 'opus';
   }
 

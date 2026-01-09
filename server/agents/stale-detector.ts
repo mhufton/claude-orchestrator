@@ -10,6 +10,11 @@ const CHECK_INTERVAL_MS = 30000; // Check every 30 seconds
 // No limit on auto-restart attempts - truly self-healing
 // The attempt_count is still tracked for visibility but doesn't block restarts
 
+// SERVER RESTART PROTECTION: Don't auto-respawn agents for a grace period after server start
+// This prevents mass respawns when server restarts (which kills all child agent processes)
+const SERVER_START_TIME = Date.now();
+const STARTUP_GRACE_PERIOD_MS = 3 * 60 * 1000; // 3 minutes - let things settle after restart
+
 // Check if a slot has a command waiting in the queue
 function getQueueStatusForSlot(slot: number): { waiting: boolean; position: number; waitingMs: number } | null {
   const status = db.getCommandQueueStatus();
@@ -43,6 +48,15 @@ export function startStaleAgentDetector(intervalMs: number = CHECK_INTERVAL_MS):
 }
 
 async function checkForStaleAgents(): Promise<void> {
+  // SERVER RESTART PROTECTION: Skip auto-respawn during grace period
+  // This prevents mass respawns when server restarts (all agents die with parent process)
+  const timeSinceStart = Date.now() - SERVER_START_TIME;
+  if (timeSinceStart < STARTUP_GRACE_PERIOD_MS) {
+    const remainingSec = Math.round((STARTUP_GRACE_PERIOD_MS - timeSinceStart) / 1000);
+    console.log(`[stale-detector] In startup grace period (${remainingSec}s remaining) - skipping auto-respawn checks`);
+    return;
+  }
+
   const inProgressTickets = db.getTicketsByState('in_progress');
 
   if (inProgressTickets.length > 0) {

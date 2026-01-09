@@ -636,18 +636,18 @@ export async function getRetryContext(ticket: Ticket): Promise<{
       // Get all PR feedback in parallel
       const prFeedback = await github.getPRFeedback(ticket.pr_number, pr.head.sha);
 
-      // CI failures with actionable details
+      // CI failures with actionable details (truncated to save tokens)
       ciFailures = prFeedback.checkFailures.map(f => {
         const output = f.output.summary || f.output.text || '';
         const url = f.html_url || f.details_url || '';
-        // Give the agent actionable information
+        // Give the agent actionable information - truncate verbose output
         let info = `**${f.name}** FAILED`;
         if (output && output !== 'No details') {
-          info += `: ${output}`;
+          const truncatedOutput = output.length > 300 ? output.slice(0, 300) + '...' : output;
+          info += `: ${truncatedOutput}`;
         }
         if (url) {
-          info += `\n   View logs: ${url}`;
-          info += `\n   Or run: \`gh run view --job ${f.id} --log-failed\` to see error details`;
+          info += `\n   Run: \`gh run view --job ${f.id} --log-failed\` for full logs`;
         }
         return info;
       });
@@ -668,8 +668,8 @@ export async function getRetryContext(ticket: Ticket): Promise<{
     }
   }
 
-  // Get recent activity from logs - get more logs for better context
-  const logs = db.getLogsForTicket(ticket.id, 100);
+  // Get recent activity from logs - limit to reduce token usage
+  const logs = db.getLogsForTicket(ticket.id, 20);
   const recentToolCalls: string[] = [];
   const recentErrors: string[] = [];
   const filesModified: Set<string> = new Set();
@@ -701,8 +701,8 @@ export async function getRetryContext(ticket: Ticket): Promise<{
               summary = `Grep("${input.pattern}")`;
             }
 
-            if (recentToolCalls.length < 15) {
-              recentToolCalls.unshift(summary); // Most recent first after reverse
+            if (recentToolCalls.length < 5) {
+              recentToolCalls.unshift(summary); // Most recent first
             }
           }
 

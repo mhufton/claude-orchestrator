@@ -237,7 +237,7 @@ export async function runRecovery(
   const proc = spawn([
     'claude',
     '-p', prompt,
-    '--model', 'opus',  // Use Opus for complex recovery
+    '--model', 'sonnet',  // Sonnet handles git recovery fine, Opus overkill
     '--output-format', 'text',
     '--max-turns', '30',  // Allow more turns for complex recovery
     '--dangerously-skip-permissions'

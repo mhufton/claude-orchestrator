@@ -63,8 +63,8 @@ Examples of useful commands:
 
 Be concise and helpful. When asked about issues or PRs, use the gh CLI to get current information.`;
 
-  // Build the CLI arguments - use Sonnet for dispatcher (conversational, lighter task)
-  const args = ['claude', '--print', '--model', 'sonnet', '--dangerously-skip-permissions'];
+  // Build the CLI arguments - use Haiku for dispatcher (simple command routing, 15x cheaper)
+  const args = ['claude', '--print', '--model', 'haiku', '--dangerously-skip-permissions'];
 
   // If we have a session ID and it's been initialized, use --resume
   // Otherwise, start fresh with the system prompt
