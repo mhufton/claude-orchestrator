@@ -864,6 +864,15 @@ export function cancelCommand(id: number): void {
   `).run(id);
 }
 
+export function getRunningCommandForSlot(slot: number): QueuedCommand | null {
+  const running = db.query(`
+    SELECT * FROM command_queue
+    WHERE slot = ? AND status = 'running'
+    LIMIT 1
+  `).get(slot) as QueuedCommand | undefined;
+  return running || null;
+}
+
 export function getCommandQueueStatus(): { waiting: number; running: QueuedCommand | null; queue: QueuedCommand[] } {
   const waiting = db.query(`
     SELECT COUNT(*) as count FROM command_queue WHERE status = 'waiting'
@@ -1089,6 +1098,10 @@ export function createBatch(input: CreateBatchInput): Batch {
 
 export function getBatchById(id: number): Batch | undefined {
   return db.query('SELECT * FROM batches WHERE id = ?').get(id) as Batch | undefined;
+}
+
+export function getBatchBySlot(slot: number): Batch | undefined {
+  return db.query('SELECT * FROM batches WHERE worktree_slot = ?').get(slot) as Batch | undefined;
 }
 
 export function getBatchesByState(state: BatchState): Batch[] {
