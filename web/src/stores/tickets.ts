@@ -13,6 +13,9 @@ interface OrchestratorSettings {
   autoPlayEnabled: boolean;
   autoPlayIntervalMs: number;
   batchingEnabled: boolean;
+  // PM Mode settings
+  agentMode: 'parallel-slots' | 'pm-single';
+  serialPRQueue: boolean;
 }
 
 interface AutoplayStatus {
@@ -101,7 +104,9 @@ export const useTicketsStore = create<TicketsState>((set, get) => ({
     maxParallelReviews: 3,
     autoPlayEnabled: false,
     autoPlayIntervalMs: 30000,
-    batchingEnabled: true
+    batchingEnabled: true,
+    agentMode: 'parallel-slots',
+    serialPRQueue: false
   },
   connected: false,
   selectedTicketId: null,
@@ -150,7 +155,7 @@ export const useTicketsStore = create<TicketsState>((set, get) => ({
       : new Map(),
     pipelineStatus: pipelineStatus || { paused: false, reason: '', pausedAt: '' },
     autoplayStatus: autoplayStatus || { enabled: false, active: false, intervalMs: 30000 },
-    settings: settings || { maxAgentSlots: 3, maxParallelReviews: 3, autoPlayEnabled: false, autoPlayIntervalMs: 30000, batchingEnabled: true },
+    settings: settings || { maxAgentSlots: 3, maxParallelReviews: 3, autoPlayEnabled: false, autoPlayIntervalMs: 30000, batchingEnabled: true, agentMode: 'parallel-slots' as const, serialPRQueue: false },
     pollStatus: pollStatus || {
       prWatch: { lastRun: null, nextRun: null, intervalMs: 120000, ticketsChecked: 0 },
       issueSync: { lastRun: null, nextRun: null, intervalMs: 60000 }

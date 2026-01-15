@@ -132,6 +132,25 @@ CREATE TABLE IF NOT EXISTS state_transitions (
   FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
 );
 
+-- Agent handoffs (persistent state for PM mode context clearing)
+CREATE TABLE IF NOT EXISTS agent_handoffs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+  -- Snapshot of work state
+  planned_batches TEXT,      -- JSON: [{label: "A", tickets: [1,2,3], status: "planned"}]
+  active_batch TEXT,         -- Current batch label
+  pr_statuses TEXT,          -- JSON: [{pr: 123, status: "ci_running", issues: [...]}]
+
+  -- What to do next
+  pending_actions TEXT,      -- JSON: [{type: "fix_ci", pr: 123, details: "..."}]
+  resume_instructions TEXT,  -- Plain English for agent
+
+  -- Context management
+  context_percentage REAL,   -- What % context was when handoff triggered
+  cleared_at TEXT            -- When /clear happened (null if not yet cleared)
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_tickets_state ON tickets(state);
 CREATE INDEX IF NOT EXISTS idx_tickets_issue_number ON tickets(github_issue_number);
