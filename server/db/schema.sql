@@ -21,8 +21,20 @@ CREATE TABLE IF NOT EXISTS tickets (
   handoff_notes TEXT,
   paused INTEGER DEFAULT 0,
   pause_reason TEXT,
+  batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL,
+  -- CI status for live tracking
+  ci_status TEXT CHECK (ci_status IN ('pending', 'running', 'passing', 'failing', 'unknown')),
+  ci_checks TEXT,
+  ci_updated_at TEXT,
+  -- Merge queue
+  merge_queue_position INTEGER,
+  merge_queue_priority INTEGER DEFAULT 0,
+  -- Progress tracking
   progress_phase TEXT DEFAULT 'starting',
   progress_percent INTEGER DEFAULT 0,
+  -- Error categorization
+  error_category TEXT,
+  should_escalate_model INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -134,6 +146,21 @@ CREATE TABLE IF NOT EXISTS state_transitions (
   FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
 );
 
+-- Merge queue (FIFO queue for PR merges)
+CREATE TABLE IF NOT EXISTS merge_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  pr_number INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  priority INTEGER DEFAULT 0,
+  lane TEXT DEFAULT 'default',
+  status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'merging', 'merged', 'failed', 'removed')),
+  entered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT,
+  completed_at TEXT,
+  failure_reason TEXT
+);
+
 -- Agent handoffs (persistent state for PM mode context clearing)
 CREATE TABLE IF NOT EXISTS agent_handoffs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,3 +199,6 @@ CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON state_transitions(
 CREATE INDEX IF NOT EXISTS idx_batches_state ON batches(state);
 CREATE INDEX IF NOT EXISTS idx_batches_area_key ON batches(area_key);
 CREATE INDEX IF NOT EXISTS idx_tickets_batch_id ON tickets(batch_id);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_status ON merge_queue(status);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_position ON merge_queue(position, lane);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_ticket ON merge_queue(ticket_id);

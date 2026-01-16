@@ -84,10 +84,11 @@ export interface AgentResult {
 }
 
 /**
- * Determine which model to use based on labels and attempt count
+ * Determine which model to use based on labels, error category, and attempt count
  * - use-opus label: always use opus
  * - use-sonnet label: always use sonnet
- * - No label: sonnet for attempt 1, opus for 2+ (escalate early to avoid loops)
+ * - should_escalate_model flag from error categorization: use opus
+ * - No label/flag: sonnet for attempts 1-3, opus for 4+ (escalate to avoid loops)
  */
 function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
   // Parse labels from JSON string
@@ -98,7 +99,7 @@ function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
     labels = [];
   }
 
-  // Check for explicit model labels
+  // Check for explicit model labels (highest priority)
   if (labels.includes('use-opus')) {
     console.log(`[model] Using opus for #${ticket.github_issue_number} (use-opus label)`);
     return 'opus';
@@ -106,6 +107,12 @@ function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
   if (labels.includes('use-sonnet')) {
     console.log(`[model] Using sonnet for #${ticket.github_issue_number} (use-sonnet label)`);
     return 'sonnet';
+  }
+
+  // Check error categorization flag (from pr-watcher)
+  if (ticket.should_escalate_model) {
+    console.log(`[model] Using opus for #${ticket.github_issue_number} (error categorization recommends escalation: ${ticket.error_category || 'unknown'})`);
+    return 'opus';
   }
 
   // Default: sonnet for attempts 1-3, opus for 4+ to balance cost vs capability
@@ -527,6 +534,14 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     }
     if (context.agentIntent) {
       console.log(`  - Agent intent: ${context.agentIntent.slice(0, 100)}...`);
+    }
+    if (context.failureAnalysis) {
+      console.log(`  - Failure analysis: ${context.failureAnalysis.category} (${context.failureAnalysis.severity})`);
+      console.log(`    Description: ${context.failureAnalysis.description}`);
+      if (context.failureAnalysis.repeatedPatterns.length > 0) {
+        console.log(`    ⚠️ Repeated patterns: ${context.failureAnalysis.repeatedPatterns.join(', ')}`);
+      }
+      console.log(`    Suggestions: ${context.failureAnalysis.suggestions.length} provided`);
     }
 
     // Build and broadcast agent context for UI

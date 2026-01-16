@@ -8,7 +8,10 @@ import { acquireSlot } from '../worktrees/pool';
 import { recordPRWatchStart, recordPRWatchComplete, addActivity, setPRWatchInterval } from '../poll-status';
 import { tryAcquireRespawnLock } from '../agents/respawn-coordinator';
 import { addToQueue, isInQueue } from '../merge-queue/manager';
-import type { Ticket } from '../state/types';
+import { completeBatch } from '../state/machine';
+import { categorizeError } from '../agents/error-types';
+import { analyzeAgentFailure } from '../agents/failure-analyzer';
+import type { Ticket, Batch } from '../state/types';
 
 const SCORE_THRESHOLD = 90;
 
@@ -74,7 +77,13 @@ function updateCIStatus(
 async function respawnForIssue(
   ticket: Ticket,
   reason: 'fixing_ci' | 'resolving_merge_conflict' | 'addressing_pr_comments' | 'improving_score',
-  issues: string[]
+  issues: string[],
+  context?: {
+    ciFailures?: Array<{ name: string; output?: string }>;
+    reviewScore?: number | null;
+    hasMergeConflict?: boolean;
+    recentErrors?: string[];
+  }
 ): Promise<WatchResult> {
   // Check if another component already triggered a respawn for this ticket
   if (!tryAcquireRespawnLock(ticket.id, `pr-watcher:${reason}`)) {
@@ -83,6 +92,18 @@ async function respawnForIssue(
       reason: 'Respawn already in progress from another source'
     };
   }
+
+  // Categorize the error to get smart retry settings
+  const categorized = categorizeError({
+    ciFailures: context?.ciFailures,
+    reviewScore: context?.reviewScore,
+    hasMergeConflict: context?.hasMergeConflict,
+    recentErrors: context?.recentErrors,
+    attemptCount: ticket.attempt_count + 1 // Next attempt count
+  });
+
+  console.log(`[error-categorization] Ticket #${ticket.github_issue_number}: ${categorized.category} (${categorized.severity})`);
+  console.log(`[error-categorization] Cooldown: ${categorized.suggestedCooldown}ms, Escalate: ${categorized.escalateModel}`);
 
   // CIRCUIT BREAKER: Check if we've exceeded max attempts
   if (ticket.attempt_count >= MAX_AUTO_ATTEMPTS) {
@@ -103,7 +124,14 @@ async function respawnForIssue(
     };
   }
 
-  console.log(`Auto-respawning agent for ticket #${ticket.github_issue_number} to fix: ${issues.join(', ')}`);
+  const newAttemptCount = ticket.attempt_count + 1;
+
+  console.log(`Auto-respawning agent for ticket #${ticket.github_issue_number} to fix: ${issues.join(', ')} (cooldown: ${categorized.suggestedCooldown}ms)`);
+
+  // Apply cooldown before respawning
+  // Note: We delay the actual spawn, not the state transition
+  // This prevents the agent from immediately starting while the issue may still be transient
+  await new Promise(resolve => setTimeout(resolve, categorized.suggestedCooldown));
 
   // Check if we need to acquire a slot
   let slotToUse = ticket.worktree_slot;
@@ -118,8 +146,6 @@ async function respawnForIssue(
     console.log(`Acquired slot ${slotToUse} for respawning ticket #${ticket.github_issue_number}`);
   }
 
-  const newAttemptCount = ticket.attempt_count + 1;
-
   // Log state transition for debugging
   logStateTransition(
     ticket.id,
@@ -128,25 +154,23 @@ async function respawnForIssue(
     ticket.attempt_count,
     newAttemptCount,
     'pr-watcher',
-    `${reason}: ${issues.join(', ')}`
+    `${reason}: ${issues.join(', ')} [${categorized.category}]`
   );
 
-  db.updateTicket(ticket.id, {
+  // Store error category for spawner to use
+  const updates: Record<string, unknown> = {
     state: 'in_progress',
     worktree_slot: slotToUse,
     attempt_count: newAttemptCount,
     retry_reason: reason,
     needs_attention: 0,
-    attention_reason: null
-  });
-  broadcastTicketUpdated(ticket.id, {
-    state: 'in_progress',
-    worktree_slot: slotToUse,
-    attempt_count: newAttemptCount,
-    retry_reason: reason,
-    needs_attention: 0,
-    attention_reason: null
-  });
+    attention_reason: null,
+    error_category: categorized.category,
+    should_escalate_model: categorized.escalateModel ? 1 : 0
+  };
+
+  db.updateTicket(ticket.id, updates);
+  broadcastTicketUpdated(ticket.id, updates);
   broadcastSlotStatus();
 
   const updatedTicket = db.getTicketById(ticket.id);
@@ -156,11 +180,11 @@ async function respawnForIssue(
     });
   }
 
-  addActivity('respawn', `Respawned #${ticket.github_issue_number}: ${reason}`);
+  addActivity('respawn', `Respawned #${ticket.github_issue_number}: ${reason} [${categorized.category}]`);
 
   return {
     action: 'respawned',
-    reason: `Agent respawned to fix: ${issues.join('; ')}`
+    reason: `Agent respawned to fix: ${issues.join('; ')} (${categorized.description})`
   };
 }
 
@@ -238,14 +262,24 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       } else {
         // Update failed - likely has conflicts now, need an agent to resolve
         console.log(`PR #${ticket.pr_number}: Branch update failed (${updateResult.message}), need agent to resolve`);
-        return await respawnForIssue(ticket, 'resolving_merge_conflict', [`Branch update failed: ${updateResult.message}`]);
+        return await respawnForIssue(
+          ticket,
+          'resolving_merge_conflict',
+          [`Branch update failed: ${updateResult.message}`],
+          { hasMergeConflict: true }
+        );
       }
     }
 
     // Check for merge conflicts - respawn immediately, don't wait for CI
     if (pr.mergeable === false) {
       console.log(`PR #${ticket.pr_number}: Has merge conflicts, respawning agent immediately`);
-      return await respawnForIssue(ticket, 'resolving_merge_conflict', ['Merge conflicts with dev branch']);
+      return await respawnForIssue(
+        ticket,
+        'resolving_merge_conflict',
+        ['Merge conflicts with dev branch'],
+        { hasMergeConflict: true }
+      );
     }
 
     // ==========================================
@@ -325,7 +359,17 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       if (hasCIFailures) primaryReason = 'fixing_ci';
       if (hasUnrepliedComments) primaryReason = 'addressing_pr_comments';
 
-      return await respawnForIssue(ticket, primaryReason, issues);
+      // Build context for error categorization
+      const errorContext = {
+        ciFailures: hasCIFailures ? checkStatus.failures.map(f => ({
+          name: f.name,
+          output: undefined // We don't have detailed output here, categorization will use name
+        })) : undefined,
+        reviewScore: score?.total,
+        hasMergeConflict: false
+      };
+
+      return await respawnForIssue(ticket, primaryReason, issues, errorContext);
     }
 
     // No issues and no score yet - wait for review
@@ -523,6 +567,53 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
   }
 }
 
+/**
+ * Watch a batch's PR for merge status
+ * Simpler than ticket watching - batches don't auto-retry on failure,
+ * they just need to detect when the PR is merged
+ */
+async function watchBatchPR(batch: Batch): Promise<WatchResult> {
+  if (!batch.pr_number) {
+    return { action: 'waiting', reason: 'No PR number' };
+  }
+
+  try {
+    const pr = await github.getPR(batch.pr_number);
+
+    // Check if PR was merged
+    if (pr.merged) {
+      console.log(`[pr-watcher] Batch ${batch.id} PR #${batch.pr_number} was merged, completing batch`);
+
+      const result = await completeBatch(batch.id);
+      if (result.success) {
+        addActivity('pr_merged', `Batch PR #${batch.pr_number} merged`);
+        return { action: 'completed', reason: 'PR merged' };
+      } else {
+        console.error(`[pr-watcher] Failed to complete batch ${batch.id}:`, result.error);
+        return { action: 'error', reason: result.error || 'Failed to complete batch' };
+      }
+    }
+
+    // Check if PR was closed without merging
+    if (pr.state === 'closed') {
+      console.log(`[pr-watcher] Batch ${batch.id} PR #${batch.pr_number} was closed without merging`);
+      db.updateBatch(batch.id, {
+        needs_attention: 1,
+        attention_reason: 'PR closed without merging'
+      });
+      return { action: 'error', reason: 'PR closed without merge' };
+    }
+
+    return { action: 'waiting', reason: 'PR still open' };
+  } catch (error) {
+    console.error(`Error watching PR for batch ${batch.id}:`, error);
+    return {
+      action: 'error',
+      reason: error instanceof Error ? error.message : 'Unknown error'
+    };
+  }
+}
+
 export function startPRWatchLoop(intervalMs: number): void {
   setPRWatchInterval(intervalMs);
 
@@ -595,6 +686,16 @@ export function startPRWatchLoop(intervalMs: number): void {
       ticketsChecked++;
     }
 
+    // Check batches in 'in_review' state
+    // Batches need to detect when their PR is merged to unblock the serial PR queue
+    const inReviewBatches = db.getBatchesByState('in_review');
+    for (const batch of inReviewBatches) {
+      const result = await watchBatchPR(batch);
+      if (result.action !== 'waiting') {
+        console.log(`[pr-watcher] Batch ${batch.id}: ${result.action} - ${result.reason}`);
+      }
+    }
+
     recordPRWatchComplete(ticketsChecked);
   }, intervalMs);
 }
@@ -615,6 +716,14 @@ export async function getRetryContext(ticket: Ticket): Promise<{
   filesModified: string[];
   agentIntent: string;
   hasMergeConflicts: boolean;
+  failureAnalysis?: {
+    category: string;
+    description: string;
+    errorMessages: string[];
+    repeatedPatterns: string[];
+    suggestions: string[];
+    severity: string;
+  };
 }> {
   const feedback = ticket.pr_number
     ? await getReviewFeedback(ticket.pr_number)
@@ -761,6 +870,18 @@ export async function getRetryContext(ticket: Ticket): Promise<{
     broadcastChatMessagesDelivered(ticket.id);
   }
 
+  // Analyze agent failure patterns to provide actionable feedback
+  // This helps agents avoid repeating the same mistakes
+  const failureAnalysis = ticket.attempt_count > 1 ? analyzeAgentFailure(ticket) : undefined;
+
+  if (failureAnalysis) {
+    console.log(`[pr-watcher] Failure analysis for ticket #${ticket.github_issue_number}:`);
+    console.log(`  Category: ${failureAnalysis.category}, Severity: ${failureAnalysis.severity}`);
+    if (failureAnalysis.repeatedPatterns.length > 0) {
+      console.log(`  ⚠️ Repeated patterns: ${failureAnalysis.repeatedPatterns.join(', ')}`);
+    }
+  }
+
   return {
     previousScore: ticket.current_score,
     reviewFeedback: feedback,
@@ -773,6 +894,14 @@ export async function getRetryContext(ticket: Ticket): Promise<{
     recentErrors,
     filesModified: Array.from(filesModified),
     agentIntent,
-    hasMergeConflicts
+    hasMergeConflicts,
+    failureAnalysis: failureAnalysis ? {
+      category: failureAnalysis.category,
+      description: failureAnalysis.description,
+      errorMessages: failureAnalysis.errorMessages,
+      repeatedPatterns: failureAnalysis.repeatedPatterns,
+      suggestions: failureAnalysis.suggestions,
+      severity: failureAnalysis.severity
+    } : undefined
   };
 }
