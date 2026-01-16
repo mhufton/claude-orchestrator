@@ -3,11 +3,12 @@ import { join, dirname } from 'path';
 import * as db from '../db';
 import { getWorktreePath } from '../worktrees/manager';
 import { buildAgentPrompt } from './prompts';
-import { broadcastAgentOutput, broadcastTicketUpdated, broadcastAgentTodos, broadcastChatMessagesDelivered, broadcastAgentContext, broadcastSlotStatus, type AgentTodo } from '../ws/handler';
+import { broadcastAgentOutput, broadcastTicketUpdated, broadcastAgentTodos, broadcastChatMessagesDelivered, broadcastAgentContext, broadcastSlotStatus, broadcastProgressUpdate, type AgentTodo } from '../ws/handler';
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForIssue, getIssue, getPR } from '../github/client';
 import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
 import { tryAcquireRespawnLock } from './respawn-coordinator';
+import { ProgressTracker } from './progress-tracker';
 import type { Ticket } from '../state/types';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
@@ -15,6 +16,9 @@ const ORCHESTRATOR_BIN = join(dirname(dirname(import.meta.dir)), 'bin');
 
 // Track current todos for each ticket
 const ticketTodos = new Map<number, AgentTodo[]>();
+
+// Track progress trackers for each ticket
+const progressTrackers = new Map<number, ProgressTracker>();
 
 // Track current context for each ticket (what the agent is working on)
 export interface AgentContext {
@@ -152,6 +156,13 @@ async function continueAgentConversation(
 
   runningAgents.set(ticket.id, proc);
 
+  // Get or create progress tracker for this ticket
+  let progressTracker = progressTrackers.get(ticket.id);
+  if (!progressTracker) {
+    progressTracker = new ProgressTracker();
+    progressTrackers.set(ticket.id, progressTracker);
+  }
+
   // Auto-clear needs_attention since agent is now running
   if (ticket.needs_attention) {
     console.log(`[agent] Auto-clearing needs_attention for #${ticket.github_issue_number} (batch agent started)`);
@@ -196,6 +207,16 @@ async function continueAgentConversation(
               status: t.status
             })));
           }
+
+          // Check for progress milestones
+          const milestone = progressTracker.detectPhase(line);
+          if (milestone) {
+            db.updateTicket(ticket.id, {
+              progress_phase: milestone.phase,
+              progress_percent: milestone.progress
+            });
+            broadcastProgressUpdate(ticket.id, milestone);
+          }
         } catch {
           db.insertLog(ticket.id, 'text', line);
           broadcastAgentOutput(ticket.id, { type: 'text', content: line });
@@ -208,6 +229,16 @@ async function continueAgentConversation(
 
   const exitCode = await proc.exited;
   runningAgents.delete(ticket.id);
+
+  // Mark progress as complete if successful
+  if (exitCode === 0) {
+    const completeMilestone = progressTracker.markComplete();
+    db.updateTicket(ticket.id, {
+      progress_phase: completeMilestone.phase,
+      progress_percent: completeMilestone.progress
+    });
+    broadcastProgressUpdate(ticket.id, completeMilestone);
+  }
 
   console.log(`[agent] Continued conversation for ticket #${ticket.github_issue_number} exited with code ${exitCode}`);
 
@@ -557,6 +588,10 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
   runningAgents.set(ticket.id, proc);
 
+  // Initialize progress tracker for this ticket
+  const progressTracker = new ProgressTracker();
+  progressTrackers.set(ticket.id, progressTracker);
+
   // Auto-clear needs_attention since agent is now running
   if (ticket.needs_attention) {
     console.log(`[agent] Auto-clearing needs_attention for #${ticket.github_issue_number} (agent started)`);
@@ -612,6 +647,16 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
               status: t.status
             })));
           }
+
+          // Check for progress milestones
+          const milestone = progressTracker.detectPhase(line);
+          if (milestone) {
+            db.updateTicket(ticket.id, {
+              progress_phase: milestone.phase,
+              progress_percent: milestone.progress
+            });
+            broadcastProgressUpdate(ticket.id, milestone);
+          }
         } catch {
           // Not JSON, treat as plain text
           db.insertLog(ticket.id, 'text', line);
@@ -626,6 +671,19 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
   // Wait for process to complete
   const exitCode = await proc.exited;
   runningAgents.delete(ticket.id);
+
+  // Mark progress as complete if successful
+  if (exitCode === 0) {
+    const completeMilestone = progressTracker.markComplete();
+    db.updateTicket(ticket.id, {
+      progress_phase: completeMilestone.phase,
+      progress_percent: completeMilestone.progress
+    });
+    broadcastProgressUpdate(ticket.id, completeMilestone);
+  }
+
+  // Clean up progress tracker
+  progressTrackers.delete(ticket.id);
 
   console.log(`Agent for ticket #${ticket.github_issue_number} exited with code ${exitCode}`);
 

@@ -1257,3 +1257,17 @@ export function broadcastMergeCompleted(ticketId: number, prNumber: number, succ
     message
   });
 }
+
+export interface ProgressMilestone {
+  phase: 'analyzing' | 'planning' | 'coding' | 'testing' | 'pr_creation' | 'complete';
+  progress: number;
+  message: string;
+}
+
+export function broadcastProgressUpdate(ticketId: number, milestone: ProgressMilestone): void {
+  broadcast({
+    type: 'progress_update',
+    ticketId,
+    progress: milestone
+  });
+}

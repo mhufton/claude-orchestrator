@@ -345,6 +345,26 @@ function runMigrations(): void {
     db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_position ON merge_queue(position, lane)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_ticket ON merge_queue(ticket_id)');
   }
+
+  // Migration: Add progress tracking columns
+  // Re-check columns after potential table recreations
+  const columnsForProgress = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesForProgress = new Set(columnsForProgress.map(c => c.name));
+  if (!columnNamesForProgress.has('progress_phase')) {
+    console.log('Migrating database: adding progress tracking columns');
+    db.exec("ALTER TABLE tickets ADD COLUMN progress_phase TEXT DEFAULT 'starting'");
+    db.exec('ALTER TABLE tickets ADD COLUMN progress_percent INTEGER DEFAULT 0');
+  }
+
+  // Migration: Add error categorization columns
+  // Re-check columns after potential table recreations
+  const columnsForErrorCategory = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesForErrorCategory = new Set(columnsForErrorCategory.map(c => c.name));
+  if (!columnNamesForErrorCategory.has('error_category')) {
+    console.log('Migrating database: adding error categorization columns');
+    db.exec('ALTER TABLE tickets ADD COLUMN error_category TEXT');
+    db.exec('ALTER TABLE tickets ADD COLUMN should_escalate_model INTEGER DEFAULT 0');
+  }
 }
 
 export function getDatabase(): Database {
@@ -407,7 +427,8 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
     'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position',
     'handoff_notes', 'paused', 'pause_reason', 'batch_id',
     'ci_status', 'ci_checks', 'ci_updated_at',
-    'merge_queue_position', 'merge_queue_priority'
+    'merge_queue_position', 'merge_queue_priority',
+    'progress_phase', 'progress_percent'
   ];
 
   const updates: string[] = [];

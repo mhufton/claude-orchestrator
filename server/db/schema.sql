@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   handoff_notes TEXT,
   paused INTEGER DEFAULT 0,
   pause_reason TEXT,
+  progress_phase TEXT DEFAULT 'starting',
+  progress_percent INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
