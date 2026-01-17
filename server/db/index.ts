@@ -365,6 +365,15 @@ function runMigrations(): void {
     db.exec('ALTER TABLE tickets ADD COLUMN error_category TEXT');
     db.exec('ALTER TABLE tickets ADD COLUMN should_escalate_model INTEGER DEFAULT 0');
   }
+
+  // Migration: Add last_checked_sha column for anti-double-respawn tracking
+  // Re-check columns after potential table recreations
+  const columnsForRespawnTracking = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesForRespawnTracking = new Set(columnsForRespawnTracking.map(c => c.name));
+  if (!columnNamesForRespawnTracking.has('last_checked_sha')) {
+    console.log('Migrating database: adding last_checked_sha column for respawn tracking');
+    db.exec('ALTER TABLE tickets ADD COLUMN last_checked_sha TEXT');
+  }
 }
 
 export function getDatabase(): Database {

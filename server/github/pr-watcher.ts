@@ -78,6 +78,7 @@ async function respawnForIssue(
   ticket: Ticket,
   reason: 'fixing_ci' | 'resolving_merge_conflict' | 'addressing_pr_comments' | 'improving_score',
   issues: string[],
+  commitSha: string,
   context?: {
     ciFailures?: Array<{ name: string; output?: string }>;
     reviewScore?: number | null;
@@ -166,7 +167,8 @@ async function respawnForIssue(
     needs_attention: 0,
     attention_reason: null,
     error_category: categorized.category,
-    should_escalate_model: categorized.escalateModel ? 1 : 0
+    should_escalate_model: categorized.escalateModel ? 1 : 0,
+    last_checked_sha: commitSha  // Track which commit we're respawning for
   };
 
   db.updateTicket(ticket.id, updates);
@@ -266,6 +268,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
           ticket,
           'resolving_merge_conflict',
           [`Branch update failed: ${updateResult.message}`],
+          pr.head.sha,
           { hasMergeConflict: true }
         );
       }
@@ -278,6 +281,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         ticket,
         'resolving_merge_conflict',
         ['Merge conflicts with dev branch'],
+        pr.head.sha,
         { hasMergeConflict: true }
       );
     }
@@ -354,6 +358,13 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     // If there are ANY issues, respawn agent with ALL of them
     // Note: Merge conflicts are already handled earlier in the flow
     if (issues.length > 0) {
+      // ANTI-DOUBLE-RESPAWN: Check if we're already working on fixing this exact commit
+      // This prevents triggering multiple respawns while agent is still working on the same failing commit
+      if (ticket.state === 'in_progress' && ticket.last_checked_sha === pr.head.sha) {
+        console.log(`PR #${ticket.pr_number}: Already working on fixing issues from commit ${pr.head.sha.slice(0, 7)}, waiting for agent to push...`);
+        return { action: 'waiting', reason: `Agent working on fixing ${issues.join(', ')}` };
+      }
+
       // Determine primary retry reason (for UI display) - prioritize by severity
       let primaryReason: 'fixing_ci' | 'addressing_pr_comments' | 'improving_score' = 'improving_score';
       if (hasCIFailures) primaryReason = 'fixing_ci';
@@ -369,7 +380,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         hasMergeConflict: false
       };
 
-      return await respawnForIssue(ticket, primaryReason, issues, errorContext);
+      return await respawnForIssue(ticket, primaryReason, issues, pr.head.sha, errorContext);
     }
 
     // No issues and no score yet - wait for review

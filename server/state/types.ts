@@ -58,6 +58,8 @@ export interface Ticket {
   // Error categorization for smart retry
   error_category: string | null;
   should_escalate_model: number;  // SQLite uses 0/1 for boolean
+  // Respawn tracking (prevent double-respawn on same commit)
+  last_checked_sha: string | null;
   // CI status for live tracking
   ci_status: CIStatus | null;
   ci_checks: string | null;  // JSON array of CICheck
