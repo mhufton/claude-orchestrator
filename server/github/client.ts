@@ -588,8 +588,9 @@ export async function getUnrepliedBotComments(prNumber: number): Promise<PRRevie
       .map(c => c.in_reply_to_id!)
   );
 
-  // Return bot comments that haven't been replied to
-  return botComments.filter(c => !repliedToIds.has(c.id));
+  // Return bot comments that haven't been replied to AND are still active
+  // Comments with line === null are outdated (code changed in subsequent commits)
+  return botComments.filter(c => !repliedToIds.has(c.id) && c.line !== null);
 }
 
 // Combined status check - tries Check Runs API first, falls back to Commit Status API
