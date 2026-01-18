@@ -338,11 +338,6 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     const score = await parseReviewScore(ticket.pr_number);
     const unrepliedComments = await github.getUnrepliedBotComments(ticket.pr_number);
 
-    if (unrepliedComments.length > 0) {
-      hasUnrepliedComments = true;
-      issues.push(`${unrepliedComments.length} unreplied review comments`);
-    }
-
     if (score) {
       db.updateTicket(ticket.id, { current_score: score.total });
       broadcastTicketUpdated(ticket.id, { current_score: score.total });
@@ -351,6 +346,14 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         hasLowScore = true;
         issues.push(`Review score ${score.total}/100 (needs >= ${SCORE_THRESHOLD})`);
       }
+    }
+
+    // Only count unreplied comments as blocking if score is below threshold
+    // If score >= SCORE_THRESHOLD, the reviewer has already judged them as non-blocking
+    // (The score would be lower if the comments were actually important)
+    if (unrepliedComments.length > 0 && (!score || score.total < SCORE_THRESHOLD)) {
+      hasUnrepliedComments = true;
+      issues.push(`${unrepliedComments.length} unreplied review comments`);
     }
 
     console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, score=${score?.total ?? 'none'}, unrepliedComments=${unrepliedComments.length}, attempt=${ticket.attempt_count}`);
