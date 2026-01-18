@@ -324,7 +324,6 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
 
     const issues: string[] = [];
     let hasCIFailures = false;
-    let hasLowScore = false;
     let hasUnrepliedComments = false;
 
     // Check CI status
@@ -343,7 +342,6 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       broadcastTicketUpdated(ticket.id, { current_score: score.total });
 
       if (score.total < SCORE_THRESHOLD) {
-        hasLowScore = true;
         issues.push(`Review score ${score.total}/100 (needs >= ${SCORE_THRESHOLD})`);
       }
     }
