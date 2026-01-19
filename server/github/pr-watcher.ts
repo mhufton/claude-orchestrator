@@ -201,7 +201,12 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     // Check if PR was merged (externally or via auto-merge)
     if (pr.merged) {
       // Ensure the corresponding GitHub issue is closed
-      await github.closeIssue(ticket.github_issue_number);
+      const closeSuccess = await github.closeIssue(ticket.github_issue_number);
+
+      if (!closeSuccess) {
+        console.error(`[pr-watcher] Failed to close issue #${ticket.github_issue_number} after PR merge - will retry`);
+        return { action: 'waiting', reason: 'Failed to close issue, will retry' };
+      }
 
       db.updateTicket(ticket.id, {
         state: 'done',
