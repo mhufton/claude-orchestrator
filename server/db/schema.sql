@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   -- Error categorization
   error_category TEXT,
   should_escalate_model INTEGER DEFAULT 0,
+  -- Respawn tracking (prevent double-respawn on same commit)
+  last_checked_sha TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );

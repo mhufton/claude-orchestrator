@@ -11,6 +11,7 @@ import {
   cancelCommand,
   getCommandQueueStatus,
   cancelStaleCommands,
+  cleanupOldQueueEntries,
   getTicketById
 } from './db';
 import { initGitHubClient } from './github/client';
@@ -110,6 +111,22 @@ console.log('Worktree manager initialized');
   // Start merge queue processor (checks every 10 seconds)
   startMergeQueueProcessor();
   console.log('Merge queue processor started (10s interval)');
+
+  // Start command queue cleanup (runs every 5 minutes)
+  setInterval(() => {
+    // Cancel commands that have been running for >30 minutes (likely orphaned)
+    const stale = cancelStaleCommands(30);
+    if (stale > 0) {
+      console.log(`[queue-cleanup] Cancelled ${stale} stale running commands`);
+    }
+
+    // Delete old completed/cancelled entries (older than 1 hour)
+    const deleted = cleanupOldQueueEntries(1);
+    if (deleted > 0) {
+      console.log(`[queue-cleanup] Deleted ${deleted} old queue entries`);
+    }
+  }, 300000); // 5 minutes
+  console.log('Command queue cleanup started (5 min interval)');
 })();
 
 // Create HTTP + WebSocket server

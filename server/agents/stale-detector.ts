@@ -16,7 +16,7 @@ const SERVER_START_TIME = Date.now();
 const STARTUP_GRACE_PERIOD_MS = 3 * 60 * 1000; // 3 minutes - let things settle after restart
 
 // Check if a slot has a command waiting in the queue
-function getQueueStatusForSlot(slot: number): { waiting: boolean; position: number; waitingMs: number } | null {
+function getQueueStatusForSlot(slot: number): { waiting: boolean; position: number; waitingMs: number; commandType: string } | null {
   const status = db.getCommandQueueStatus();
 
   // Find any waiting or running command for this slot
@@ -35,7 +35,7 @@ function getQueueStatusForSlot(slot: number): { waiting: boolean; position: numb
   // How long has it been waiting?
   const waitingMs = Date.now() - new Date(waitingCmd.requested_at).getTime();
 
-  return { waiting: true, position, waitingMs };
+  return { waiting: true, position, waitingMs, commandType: waitingCmd.command_type };
 }
 
 export function startStaleAgentDetector(intervalMs: number = CHECK_INTERVAL_MS): void {
@@ -202,7 +202,7 @@ async function checkForStaleAgents(): Promise<void> {
 
           // Only flag if waiting excessively long (likely stuck)
           if (queueStatus.waitingMs > QUEUE_WAIT_THRESHOLD_MS) {
-            const reason = `Agent waiting in queue for ${queueMinutes} minutes (position ${queueStatus.position + 1}) - may be stuck`;
+            const reason = `Agent stuck waiting to run ${queueStatus.commandType} command (queue position ${queueStatus.position + 1}, ${queueMinutes} min) - likely stale commands blocking`;
             console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: ${reason}`);
 
             db.updateTicket(ticket.id, {
@@ -216,7 +216,7 @@ async function checkForStaleAgents(): Promise<void> {
             });
           } else {
             // Normal queue wait - just log it, don't flag
-            console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: Waiting in queue (position ${queueStatus.position + 1}, ${queueMinutes}min) - not flagging as stalled`);
+            console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: Waiting to run ${queueStatus.commandType} command (position ${queueStatus.position + 1}, ${queueMinutes}min) - not flagging as stalled`);
           }
           continue; // Skip normal stale handling
         }

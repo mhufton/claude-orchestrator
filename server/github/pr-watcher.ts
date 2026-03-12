@@ -78,6 +78,7 @@ async function respawnForIssue(
   ticket: Ticket,
   reason: 'fixing_ci' | 'resolving_merge_conflict' | 'addressing_pr_comments' | 'improving_score',
   issues: string[],
+  commitSha: string,
   context?: {
     ciFailures?: Array<{ name: string; output?: string }>;
     reviewScore?: number | null;
@@ -166,7 +167,8 @@ async function respawnForIssue(
     needs_attention: 0,
     attention_reason: null,
     error_category: categorized.category,
-    should_escalate_model: categorized.escalateModel ? 1 : 0
+    should_escalate_model: categorized.escalateModel ? 1 : 0,
+    last_checked_sha: commitSha  // Track which commit we're respawning for
   };
 
   db.updateTicket(ticket.id, updates);
@@ -199,7 +201,12 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     // Check if PR was merged (externally or via auto-merge)
     if (pr.merged) {
       // Ensure the corresponding GitHub issue is closed
-      await github.closeIssue(ticket.github_issue_number);
+      const closeSuccess = await github.closeIssue(ticket.github_issue_number);
+
+      if (!closeSuccess) {
+        console.error(`[pr-watcher] Failed to close issue #${ticket.github_issue_number} after PR merge - will retry`);
+        return { action: 'waiting', reason: 'Failed to close issue, will retry' };
+      }
 
       db.updateTicket(ticket.id, {
         state: 'done',
@@ -266,6 +273,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
           ticket,
           'resolving_merge_conflict',
           [`Branch update failed: ${updateResult.message}`],
+          pr.head.sha,
           { hasMergeConflict: true }
         );
       }
@@ -278,6 +286,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         ticket,
         'resolving_merge_conflict',
         ['Merge conflicts with dev branch'],
+        pr.head.sha,
         { hasMergeConflict: true }
       );
     }
@@ -320,7 +329,6 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
 
     const issues: string[] = [];
     let hasCIFailures = false;
-    let hasLowScore = false;
     let hasUnrepliedComments = false;
 
     // Check CI status
@@ -334,19 +342,21 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     const score = await parseReviewScore(ticket.pr_number);
     const unrepliedComments = await github.getUnrepliedBotComments(ticket.pr_number);
 
-    if (unrepliedComments.length > 0) {
-      hasUnrepliedComments = true;
-      issues.push(`${unrepliedComments.length} unreplied review comments`);
-    }
-
     if (score) {
       db.updateTicket(ticket.id, { current_score: score.total });
       broadcastTicketUpdated(ticket.id, { current_score: score.total });
 
       if (score.total < SCORE_THRESHOLD) {
-        hasLowScore = true;
         issues.push(`Review score ${score.total}/100 (needs >= ${SCORE_THRESHOLD})`);
       }
+    }
+
+    // Only count unreplied comments as blocking if score is below threshold
+    // If score >= SCORE_THRESHOLD, the reviewer has already judged them as non-blocking
+    // (The score would be lower if the comments were actually important)
+    if (unrepliedComments.length > 0 && (!score || score.total < SCORE_THRESHOLD)) {
+      hasUnrepliedComments = true;
+      issues.push(`${unrepliedComments.length} unreplied review comments`);
     }
 
     console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, score=${score?.total ?? 'none'}, unrepliedComments=${unrepliedComments.length}, attempt=${ticket.attempt_count}`);
@@ -354,6 +364,13 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     // If there are ANY issues, respawn agent with ALL of them
     // Note: Merge conflicts are already handled earlier in the flow
     if (issues.length > 0) {
+      // ANTI-DOUBLE-RESPAWN: Check if we're already working on fixing this exact commit
+      // This prevents triggering multiple respawns while agent is still working on the same failing commit
+      if (ticket.state === 'in_progress' && ticket.last_checked_sha === pr.head.sha) {
+        console.log(`PR #${ticket.pr_number}: Already working on fixing issues from commit ${pr.head.sha.slice(0, 7)}, waiting for agent to push...`);
+        return { action: 'waiting', reason: `Agent working on fixing ${issues.join(', ')}` };
+      }
+
       // Determine primary retry reason (for UI display) - prioritize by severity
       let primaryReason: 'fixing_ci' | 'addressing_pr_comments' | 'improving_score' = 'improving_score';
       if (hasCIFailures) primaryReason = 'fixing_ci';
@@ -369,7 +386,7 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
         hasMergeConflict: false
       };
 
-      return await respawnForIssue(ticket, primaryReason, issues, errorContext);
+      return await respawnForIssue(ticket, primaryReason, issues, pr.head.sha, errorContext);
     }
 
     // No issues and no score yet - wait for review

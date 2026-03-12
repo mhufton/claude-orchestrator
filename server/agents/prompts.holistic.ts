@@ -1,5 +1,14 @@
 import type { Ticket, ReviewContext, Batch } from '../state/types';
 
+/**
+ * MODIFIED VERSION WITH /HOLISTIC INTEGRATION
+ *
+ * To use:
+ * 1. Backup original: cp prompts.ts prompts.backup.ts
+ * 2. Copy this file: cp prompts.holistic.ts prompts.ts
+ * 3. Ensure target repo has .claude/commands/holistic.md
+ */
+
 export function buildAgentPrompt(ticket: Ticket, context?: ReviewContext): string {
   const repoOwner = process.env.GITHUB_OWNER || 'OWNER';
   const repoName = process.env.GITHUB_REPO || 'REPO';
@@ -9,7 +18,7 @@ export function buildAgentPrompt(ticket: Ticket, context?: ReviewContext): strin
     return buildRetryPrompt(ticket, context);
   }
 
-  // First attempt - full context prompt
+  // First attempt - full context prompt WITH HOLISTIC ANALYSIS
   const basePrompt = `You are working on GitHub issue #${ticket.github_issue_number}
 
 ## Issue Title
@@ -22,7 +31,78 @@ ${ticket.body || 'No description provided.'}
 - Owner: ${repoOwner}
 - Repo: ${repoName}
 
-## CRITICAL REQUIREMENTS
+## 🔍 STEP 0: HOLISTIC ANALYSIS (CRITICAL - Run This First!)
+
+**BEFORE writing ANY code**, run architectural analysis to understand existing patterns:
+
+\`\`\`bash
+/holistic "Issue #${ticket.github_issue_number}: ${ticket.title}"
+\`\`\`
+
+### Why This Matters
+
+The holistic analysis prevents you from:
+- ❌ Recreating functionality that already exists
+- ❌ Inventing new patterns when established ones exist
+- ❌ Breaking existing code by missing dependencies
+- ❌ Making changes that conflict with established architecture
+
+Instead, it helps you:
+- ✅ Find existing code to reuse or extend
+- ✅ Follow established patterns for consistency
+- ✅ Understand cross-component dependencies
+- ✅ Identify risks early (breaking changes, resource replacement)
+
+### What You'll Get
+
+The analysis will show you:
+
+1. **Code Reuse Opportunities** (MOST IMPORTANT)
+   - Similar functionality that already exists
+   - Utility functions and shared libraries
+   - Patterns you should extend instead of recreate
+
+2. **Pattern Examples**
+   - 2-3 examples of similar code in the codebase
+   - Established conventions to follow
+   - Common approaches for this type of change
+
+3. **Dependencies & Impact**
+   - What other parts of the system are affected
+   - Cross-stack or cross-component references
+   - Integration points to consider
+
+4. **Risk Assessment**
+   - Breaking changes to watch for
+   - Resource replacement risks (especially for CDK/infrastructure)
+   - Security or cost implications
+
+5. **Recommended Approach**
+   - Extend existing vs. create new
+   - Which specialized agents to consult if needed
+   - Specific files and patterns to follow
+
+### How to Use the Findings
+
+**If holistic finds existing code to reuse:**
+→ EXTEND IT. Don't recreate the wheel.
+
+**If holistic shows you pattern examples:**
+→ FOLLOW THEM. Consistency matters more than cleverness.
+
+**If holistic identifies risks:**
+→ ADDRESS THEM. Prevention is easier than fixing.
+
+**If holistic finds nothing:**
+→ OK! You're creating a new pattern. Document it well for future agents.
+
+---
+
+## STEP 1: IMPLEMENTATION
+
+Now that you understand the context from holistic analysis, implement the solution following the discovered patterns.
+
+### CRITICAL REQUIREMENTS
 
 **BEFORE creating a PR, you MUST verify:**
 1. The actual problem described in the issue is SOLVED
@@ -34,8 +114,10 @@ ${ticket.body || 'No description provided.'}
 
 **If you encounter obstacles:** Debug them. Read error messages carefully. Try different approaches.
 
-## CORE PRINCIPLES
+### CORE PRINCIPLES
 
+- **Reuse Over Reinvent** - If holistic found existing code, extend it
+- **Follow Established Patterns** - Use the examples holistic showed you
 - **Simple is Better** - Don't over-engineer
 - **Small Commits, Small Scope** - Do one thing well
 - **PRs Target dev** - All PRs must target the \`dev\` branch, NOT \`main\`
@@ -44,11 +126,13 @@ ${ticket.body || 'No description provided.'}
 
 ## WORKFLOW
 
-1. **Implement** the solution
-2. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
-3. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
-4. **Write handoff notes** (see below)
-5. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
+1. **Run holistic analysis** (Step 0 above)
+2. **Review findings** and plan approach based on existing patterns
+3. **Implement** the solution following discovered patterns
+4. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
+5. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
+6. **Write handoff notes** (see below)
+7. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
 
 PR body format:
 \`\`\`
@@ -67,6 +151,11 @@ Closes #${ticket.github_issue_number}
 
 \`\`\`markdown
 # Handoff Notes for Issue #${ticket.github_issue_number}
+
+## Holistic Analysis Summary
+- Existing patterns found: [List code you reused/extended, or "None - new pattern"]
+- New patterns created: [List new code created, or "None - only extended existing"]
+- Dependencies affected: [Cross-stack/component impacts, or "None - isolated change"]
 
 ## What I Did
 - [Brief summary of the approach taken]
@@ -96,6 +185,8 @@ IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases 
 /**
  * Directive retry prompt - tells agent exactly what to investigate and fix
  * No passive information dumps - clear action items only
+ *
+ * NOTE: Retries skip holistic analysis since it was done in first attempt
  */
 function buildRetryPrompt(ticket: Ticket, context: ReviewContext): string {
   const prNumber = ticket.pr_number;
@@ -190,32 +281,6 @@ ${context.reviewFeedback}
 `
     : '';
 
-  // Include failure analysis if available
-  const failureAnalysisSection = context.failureAnalysis
-    ? `## Failure Analysis from Previous Attempt:
-
-**Category:** ${context.failureAnalysis.category}
-**Severity:** ${context.failureAnalysis.severity}
-**Root Cause:** ${context.failureAnalysis.description}
-
-${context.failureAnalysis.repeatedPatterns.length > 0
-  ? `**⚠️ Warning - Repeated Patterns Detected:**
-${context.failureAnalysis.repeatedPatterns.map(p => `  - ${p}`).join('\n')}
-
-These approaches are NOT working. You must try something fundamentally different.
-
-`
-  : ''}${context.failureAnalysis.errorMessages.length > 0
-  ? `**Recent Errors:**
-${context.failureAnalysis.errorMessages.slice(0, 3).map((e, i) => `  ${i + 1}. ${e.split('\n')[0]}`).join('\n')}
-
-`
-  : ''}**Actionable Suggestions:**
-${context.failureAnalysis.suggestions.map(s => `  • ${s}`).join('\n')}
-
-`
-    : '';
-
   return `Issue #${ticket.github_issue_number}: "${ticket.title}"
 PR #${prNumber} - Attempt #${ticket.attempt_count}
 
@@ -223,12 +288,12 @@ PR #${prNumber} - Attempt #${ticket.attempt_count}
 
 ${investigationSteps.join('\n')}
 
-${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}${failureAnalysisSection}## After Investigating, Fix The Issues:
+${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}## After Investigating, Fix The Issues:
 
 1. Make the necessary changes
 2. Test locally: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 3. Commit and push: \`git add . && git commit -m "Fix: [what you fixed]" && git push\`
-4. Write handoff notes: Create \`.claude-handoff.md\` explaining what you did (don't commit it)
+4. Update handoff notes: Update \`.claude-handoff.md\` with what you fixed (don't commit it)
 
 **Remember:**
 - PRs target dev branch
@@ -259,6 +324,7 @@ IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases 
 
 /**
  * Build a prompt for a batch agent that handles multiple related issues
+ * INCLUDES HOLISTIC ANALYSIS for finding shared patterns across batch
  */
 export function buildBatchAgentPrompt(batch: Batch, tickets: Ticket[]): string {
   const repoOwner = process.env.GITHUB_OWNER || 'OWNER';
@@ -287,16 +353,50 @@ ${issuesSection}
 - Owner: ${repoOwner}
 - Repo: ${repoName}
 
+## 🔍 STEP 0: HOLISTIC ANALYSIS FOR BATCH (CRITICAL!)
+
+**BEFORE planning implementation**, run holistic analysis to find shared patterns:
+
+\`\`\`bash
+/holistic "Batch work for ${batch.area_key}: Issues ${issueNumbers.join(', ')}"
+\`\`\`
+
+### Why This Is ESPECIALLY Important for Batches
+
+With ${tickets.length} related issues:
+- They likely share common functionality
+- You can implement shared code ONCE instead of ${tickets.length} times
+- Existing code may already handle some of these issues
+- You'll avoid creating duplicate/conflicting implementations
+
+### What to Look For in Holistic Analysis
+
+1. **Shared Patterns** - Code that handles similar cases across issues
+2. **Common Dependencies** - Database models, APIs, services used by all
+3. **Existing Utilities** - Helper functions that could serve multiple issues
+4. **Architectural Consistency** - How similar features are structured
+
+**Example:**
+If 3 issues all need "validation", holistic might find:
+- Existing validation utility at lib/validators.ts
+- Pattern: validator functions return { valid: boolean, errors: string[] }
+- Used by: user registration, payment forms, settings updates
+→ Recommendation: Extend existing validators instead of creating 3 new ones
+
+---
+
 ## BATCH WORK INSTRUCTIONS
 
 **IMPORTANT:** These issues are related and should be implemented together in a single cohesive PR.
 
-### Strategy:
+### Strategy Based on Holistic Findings:
+
 1. **Read ALL issues first** to understand the full scope
-2. **Plan a unified approach** that addresses ALL issues efficiently
-3. **Look for shared code/patterns** that can serve multiple issues
-4. **Implement in logical order** (dependencies first)
-5. **Create ONE PR** that closes ALL issues
+2. **Review holistic analysis** - what patterns exist?
+3. **Plan a unified approach** that addresses ALL issues efficiently
+4. **Look for shared code/patterns** that can serve multiple issues
+5. **Implement in logical order** (dependencies first)
+6. **Create ONE PR** that closes ALL issues
 
 ## CRITICAL REQUIREMENTS
 
@@ -310,6 +410,7 @@ ${issuesSection}
 
 ## CORE PRINCIPLES
 
+- **Reuse Over Reinvent** - Holistic found shared code? Use it for ALL issues
 - **Simple is Better** - Don't over-engineer
 - **Small Commits are OK** - But they should build toward solving ALL issues
 - **PRs Target dev** - All PRs must target the \`dev\` branch, NOT \`main\`
@@ -317,18 +418,20 @@ ${issuesSection}
 
 ## WORKFLOW
 
-1. **Analyze** all ${tickets.length} issues and plan unified approach
-2. **Implement** solutions (may require multiple commits)
-3. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
-4. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
-5. **Write handoff notes** (see below)
-6. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
+1. **Run holistic analysis** (Step 0 above) to find shared patterns
+2. **Analyze** all ${tickets.length} issues and plan unified approach based on findings
+3. **Implement** solutions (may require multiple commits)
+4. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
+5. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
+6. **Write handoff notes** (see below)
+7. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
 
 ## PR Format (CRITICAL - Must Close All Issues)
 
 \`\`\`
 ## Summary
 [Brief overview of what this batch accomplishes - 2-3 sentences]
+[Mention if you reused existing patterns from holistic analysis]
 
 ## Changes
 - [Key changes by area/component]
@@ -350,6 +453,11 @@ ${closesClause}
 
 ## Issues Addressed
 ${tickets.map(t => `- #${t.github_issue_number}: ${t.title}`).join('\n')}
+
+## Holistic Analysis Summary
+- Shared patterns found: [List common code/patterns reused across issues]
+- New patterns created: [List any new shared utilities created]
+- Efficiency gains: [How batching saved effort, e.g., "1 validator serves 3 issues"]
 
 ## What I Did
 - [Brief summary of the unified approach]
@@ -377,6 +485,9 @@ IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases 
 /**
  * Build a prompt for reviewing a PR created by an agent
  * This agent scores the PR and provides feedback
+ *
+ * NOTE: No changes needed to review prompt - holistic is for implementation agents only
+ * Review agents evaluate completed work, they don't need architectural analysis
  */
 export function buildPRReviewPrompt(
   ticket: Ticket,

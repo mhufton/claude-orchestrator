@@ -84,6 +84,39 @@ export interface AgentResult {
 }
 
 /**
+ * Calculate exponential backoff delay for agent respawns
+ *
+ * @param attemptCount - Current attempt number (1-indexed)
+ * @param baseDelay - Base delay in milliseconds (default: 5000ms = 5s)
+ * @param backoffFactor - Exponential growth factor (default: 2)
+ * @param maxDelay - Maximum delay cap in milliseconds (default: 120000ms = 2min)
+ * @returns Calculated delay in milliseconds, capped at maxDelay
+ *
+ * Examples:
+ * - attemptCount=1, baseDelay=5000: 5s
+ * - attemptCount=2, baseDelay=5000: 10s
+ * - attemptCount=3, baseDelay=5000: 20s
+ * - attemptCount=4, baseDelay=5000: 40s
+ * - attemptCount=5, baseDelay=5000: 80s
+ * - attemptCount=6, baseDelay=5000: 120s (capped at maxDelay)
+ */
+export function calculateBackoffDelay(
+  attemptCount: number,
+  baseDelay: number = 5000,
+  backoffFactor: number = 2,
+  maxDelay: number = 120000
+): number {
+  // Ensure attemptCount is at least 1
+  const normalizedAttempt = Math.max(1, attemptCount);
+
+  // Calculate exponential delay: baseDelay * (backoffFactor ^ (attemptCount - 1))
+  const delay = baseDelay * Math.pow(backoffFactor, normalizedAttempt - 1);
+
+  // Cap at maxDelay
+  return Math.min(delay, maxDelay);
+}
+
+/**
  * Determine which model to use based on labels, error category, and attempt count
  * - use-opus label: always use opus
  * - use-sonnet label: always use sonnet
@@ -788,12 +821,19 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
       const nextAttempt = ticket.attempt_count + 1;
 
-      // Exponential backoff: attempt 1 = 2s, attempt 2 = 30s, attempt 3 = 2min
-      const backoffDelays = [2000, 30000, 120000];
-      const delayMs = backoffDelays[Math.min(ticket.attempt_count, backoffDelays.length - 1)];
+      // Use error categorization cooldown as base delay if available
+      // Error category is set by pr-watcher when it detects specific failure types
+      const { categorizeError } = await import('./error-types');
+      const categorization = categorizeError({
+        agentExitCode: exitCode,
+        attemptCount: ticket.attempt_count
+      });
+
+      const baseDelay = categorization.suggestedCooldown;
+      const delayMs = calculateBackoffDelay(nextAttempt, baseDelay);
       const delayDesc = delayMs >= 60000 ? `${delayMs / 60000}min` : `${delayMs / 1000}s`;
 
-      console.log(`[self-heal] Agent for ticket #${ticket.github_issue_number} exited with code ${exitCode}, respawning in ${delayDesc} (attempt ${nextAttempt}/${MAX_AUTO_ATTEMPTS})`);
+      console.log(`[self-heal] Agent for ticket #${ticket.github_issue_number} exited with code ${exitCode}, respawning in ${delayDesc} (attempt ${nextAttempt}/${MAX_AUTO_ATTEMPTS}, base: ${baseDelay}ms, category: ${categorization.category})`);
 
       db.updateTicket(ticket.id, {
         attempt_count: nextAttempt,

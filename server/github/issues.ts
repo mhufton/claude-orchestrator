@@ -175,12 +175,17 @@ export async function syncIssues(readyLabel: string): Promise<{ added: number; u
       }
     } else if (existing.state === 'done') {
       // Ticket was completed but still has labels
-      // Only re-open if there's no merged PR (otherwise it's legitimately done, just needs label cleanup)
+      // Only re-open if there's no merged PR (otherwise it's legitimately done, just needs closing)
       if (existing.pr_number) {
-        console.log(`[sync] Issue #${issue.number} done with merged PR #${existing.pr_number} - removing stale labels`);
-        // Remove labels so it doesn't keep getting re-opened
-        github.removeLabelFromIssue(issue.number, readyLabel).catch(() => {});
-        github.removeLabelFromIssue(issue.number, CLAUDE_REVIEW_LABEL).catch(() => {});
+        // Issue should have been closed but is still open - try to close it again
+        console.log(`[sync] Issue #${issue.number} done with merged PR #${existing.pr_number} - attempting to close`);
+        const closeSuccess = await github.closeIssue(issue.number);
+        if (closeSuccess) {
+          console.log(`[sync] Successfully closed issue #${issue.number}`);
+          // Don't remove labels - issue will disappear from next sync when it's closed
+        } else {
+          console.error(`[sync] Failed to close issue #${issue.number} - keeping labels for visibility`);
+        }
       } else {
         // No PR = work wasn't actually done, re-open it
         console.log(`[sync] Re-opening done ticket #${issue.number} -> ${state} (no merged PR)`);
