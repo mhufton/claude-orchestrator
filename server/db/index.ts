@@ -345,6 +345,26 @@ function runMigrations(): void {
     db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_position ON merge_queue(position, lane)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_merge_queue_ticket ON merge_queue(ticket_id)');
   }
+
+  // Migration: Add progress tracking columns
+  // Re-check columns after potential table recreations
+  const columnsForProgress = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesForProgress = new Set(columnsForProgress.map(c => c.name));
+  if (!columnNamesForProgress.has('progress_phase')) {
+    console.log('Migrating database: adding progress tracking columns');
+    db.exec("ALTER TABLE tickets ADD COLUMN progress_phase TEXT DEFAULT 'starting'");
+    db.exec('ALTER TABLE tickets ADD COLUMN progress_percent INTEGER DEFAULT 0');
+  }
+
+  // Migration: Add error categorization columns
+  // Re-check columns after potential table recreations
+  const columnsForErrorCategory = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesForErrorCategory = new Set(columnsForErrorCategory.map(c => c.name));
+  if (!columnNamesForErrorCategory.has('error_category')) {
+    console.log('Migrating database: adding error categorization columns');
+    db.exec('ALTER TABLE tickets ADD COLUMN error_category TEXT');
+    db.exec('ALTER TABLE tickets ADD COLUMN should_escalate_model INTEGER DEFAULT 0');
+  }
 }
 
 export function getDatabase(): Database {
@@ -407,7 +427,8 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
     'needs_attention', 'attention_reason', 'retry_reason', 'priority', 'position',
     'handoff_notes', 'paused', 'pause_reason', 'batch_id',
     'ci_status', 'ci_checks', 'ci_updated_at',
-    'merge_queue_position', 'merge_queue_priority'
+    'merge_queue_position', 'merge_queue_priority',
+    'progress_phase', 'progress_percent'
   ];
 
   const updates: string[] = [];
@@ -747,6 +768,9 @@ export interface OrchestratorSettings {
   autoPlayEnabled: boolean;
   autoPlayIntervalMs: number;
   batchingEnabled: boolean;
+  // PM Mode settings
+  agentMode: 'parallel-slots' | 'pm-single';  // parallel-slots = legacy, pm-single = single PM agent
+  serialPRQueue: boolean;  // Only allow 1 PR in review at a time
 }
 
 const DEFAULT_SETTINGS: OrchestratorSettings = {
@@ -754,7 +778,10 @@ const DEFAULT_SETTINGS: OrchestratorSettings = {
   maxParallelReviews: 3,
   autoPlayEnabled: false,
   autoPlayIntervalMs: 30000,  // 30 seconds
-  batchingEnabled: true       // Auto-batch related tickets by default
+  batchingEnabled: true,      // Auto-batch related tickets by default
+  // PM Mode defaults (off by default for backwards compat)
+  agentMode: 'parallel-slots',
+  serialPRQueue: false
 };
 
 export function getSettings(): OrchestratorSettings {
@@ -862,6 +889,15 @@ export function cancelCommand(id: number): void {
     SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).run(id);
+}
+
+export function getRunningCommandForSlot(slot: number): QueuedCommand | null {
+  const running = db.query(`
+    SELECT * FROM command_queue
+    WHERE slot = ? AND status = 'running'
+    LIMIT 1
+  `).get(slot) as QueuedCommand | undefined;
+  return running || null;
 }
 
 export function getCommandQueueStatus(): { waiting: number; running: QueuedCommand | null; queue: QueuedCommand[] } {
@@ -1089,6 +1125,10 @@ export function createBatch(input: CreateBatchInput): Batch {
 
 export function getBatchById(id: number): Batch | undefined {
   return db.query('SELECT * FROM batches WHERE id = ?').get(id) as Batch | undefined;
+}
+
+export function getBatchBySlot(slot: number): Batch | undefined {
+  return db.query('SELECT * FROM batches WHERE worktree_slot = ?').get(slot) as Batch | undefined;
 }
 
 export function getBatchesByState(state: BatchState): Batch[] {
@@ -1453,6 +1493,232 @@ export function cleanupOldMergeQueueEntries(olderThanHours: number = 24): number
     WHERE status IN ('merged', 'failed', 'removed')
     AND completed_at < datetime('now', '-' || ? || ' hours')
   `).run(olderThanHours);
+
+  return result.changes;
+}
+
+// ============================================================================
+// Agent Handoffs (PM Mode persistent state)
+// ============================================================================
+
+export interface PlannedBatch {
+  label: string;
+  tickets: number[];
+  strategy: 'combine' | 'parallel' | 'sequential';
+  status: 'planned' | 'in_progress' | 'pr_open' | 'merged' | 'failed';
+  dependsOn?: string[];
+  prNumber?: number;
+  notes?: string;
+}
+
+export interface PRStatus {
+  pr: number;
+  status: 'ci_pending' | 'ci_running' | 'ci_passing' | 'ci_failing' | 'merged';
+  issues: string[];
+}
+
+export interface PendingAction {
+  type: 'fix_ci' | 'resolve_conflicts' | 'reply_comment' | 'create_followup';
+  target: string;
+  details: string;
+}
+
+export interface AgentHandoff {
+  id: number;
+  created_at: string;
+  planned_batches: PlannedBatch[];
+  active_batch: string | null;
+  pr_statuses: PRStatus[];
+  pending_actions: PendingAction[];
+  resume_instructions: string;
+  context_percentage: number | null;
+  cleared_at: string | null;
+}
+
+/**
+ * Create a new handoff record
+ */
+export function createHandoff(handoff: Omit<AgentHandoff, 'id' | 'created_at' | 'cleared_at'>): AgentHandoff {
+  const result = db.query(`
+    INSERT INTO agent_handoffs (
+      planned_batches, active_batch, pr_statuses,
+      pending_actions, resume_instructions, context_percentage
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    JSON.stringify(handoff.planned_batches),
+    handoff.active_batch,
+    JSON.stringify(handoff.pr_statuses),
+    JSON.stringify(handoff.pending_actions),
+    handoff.resume_instructions,
+    handoff.context_percentage
+  );
+
+  return getHandoffById(Number(result.lastInsertRowid))!;
+}
+
+/**
+ * Get a handoff by ID
+ */
+export function getHandoffById(id: number): AgentHandoff | undefined {
+  const row = db.query('SELECT * FROM agent_handoffs WHERE id = ?').get(id) as {
+    id: number;
+    created_at: string;
+    planned_batches: string | null;
+    active_batch: string | null;
+    pr_statuses: string | null;
+    pending_actions: string | null;
+    resume_instructions: string | null;
+    context_percentage: number | null;
+    cleared_at: string | null;
+  } | undefined;
+
+  if (!row) return undefined;
+
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    planned_batches: row.planned_batches ? JSON.parse(row.planned_batches) : [],
+    active_batch: row.active_batch,
+    pr_statuses: row.pr_statuses ? JSON.parse(row.pr_statuses) : [],
+    pending_actions: row.pending_actions ? JSON.parse(row.pending_actions) : [],
+    resume_instructions: row.resume_instructions || '',
+    context_percentage: row.context_percentage,
+    cleared_at: row.cleared_at
+  };
+}
+
+/**
+ * Get the latest handoff (most recent)
+ */
+export function getLatestHandoff(): AgentHandoff | undefined {
+  const row = db.query('SELECT * FROM agent_handoffs ORDER BY created_at DESC LIMIT 1').get() as {
+    id: number;
+    created_at: string;
+    planned_batches: string | null;
+    active_batch: string | null;
+    pr_statuses: string | null;
+    pending_actions: string | null;
+    resume_instructions: string | null;
+    context_percentage: number | null;
+    cleared_at: string | null;
+  } | undefined;
+
+  if (!row) return undefined;
+
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    planned_batches: row.planned_batches ? JSON.parse(row.planned_batches) : [],
+    active_batch: row.active_batch,
+    pr_statuses: row.pr_statuses ? JSON.parse(row.pr_statuses) : [],
+    pending_actions: row.pending_actions ? JSON.parse(row.pending_actions) : [],
+    resume_instructions: row.resume_instructions || '',
+    context_percentage: row.context_percentage,
+    cleared_at: row.cleared_at
+  };
+}
+
+/**
+ * Get the latest uncleared handoff (needs resuming)
+ */
+export function getUnclearedHandoff(): AgentHandoff | undefined {
+  const row = db.query('SELECT * FROM agent_handoffs WHERE cleared_at IS NULL ORDER BY created_at DESC LIMIT 1').get() as {
+    id: number;
+    created_at: string;
+    planned_batches: string | null;
+    active_batch: string | null;
+    pr_statuses: string | null;
+    pending_actions: string | null;
+    resume_instructions: string | null;
+    context_percentage: number | null;
+    cleared_at: string | null;
+  } | undefined;
+
+  if (!row) return undefined;
+
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    planned_batches: row.planned_batches ? JSON.parse(row.planned_batches) : [],
+    active_batch: row.active_batch,
+    pr_statuses: row.pr_statuses ? JSON.parse(row.pr_statuses) : [],
+    pending_actions: row.pending_actions ? JSON.parse(row.pending_actions) : [],
+    resume_instructions: row.resume_instructions || '',
+    context_percentage: row.context_percentage,
+    cleared_at: row.cleared_at
+  };
+}
+
+/**
+ * Mark a handoff as cleared (context was cleared after this handoff)
+ */
+export function markHandoffCleared(id: number): void {
+  db.query(`
+    UPDATE agent_handoffs
+    SET cleared_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(id);
+}
+
+/**
+ * Update a handoff with new state
+ */
+export function updateHandoff(id: number, updates: Partial<Omit<AgentHandoff, 'id' | 'created_at'>>): void {
+  const setClauses: string[] = [];
+  const values: (string | number | null)[] = [];
+
+  if (updates.planned_batches !== undefined) {
+    setClauses.push('planned_batches = ?');
+    values.push(JSON.stringify(updates.planned_batches));
+  }
+  if (updates.active_batch !== undefined) {
+    setClauses.push('active_batch = ?');
+    values.push(updates.active_batch);
+  }
+  if (updates.pr_statuses !== undefined) {
+    setClauses.push('pr_statuses = ?');
+    values.push(JSON.stringify(updates.pr_statuses));
+  }
+  if (updates.pending_actions !== undefined) {
+    setClauses.push('pending_actions = ?');
+    values.push(JSON.stringify(updates.pending_actions));
+  }
+  if (updates.resume_instructions !== undefined) {
+    setClauses.push('resume_instructions = ?');
+    values.push(updates.resume_instructions);
+  }
+  if (updates.context_percentage !== undefined) {
+    setClauses.push('context_percentage = ?');
+    values.push(updates.context_percentage);
+  }
+  if (updates.cleared_at !== undefined) {
+    setClauses.push('cleared_at = ?');
+    values.push(updates.cleared_at);
+  }
+
+  if (setClauses.length === 0) return;
+
+  values.push(id);
+  db.query(`UPDATE agent_handoffs SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
+}
+
+/**
+ * Delete old handoffs (cleanup)
+ */
+export function cleanupOldHandoffs(keepLast: number = 10): number {
+  // Get IDs to keep
+  const keepIds = db.query(`
+    SELECT id FROM agent_handoffs ORDER BY created_at DESC LIMIT ?
+  `).all(keepLast) as { id: number }[];
+
+  if (keepIds.length === 0) return 0;
+
+  const idsToKeep = keepIds.map(r => r.id);
+  const placeholders = idsToKeep.map(() => '?').join(',');
+
+  const result = db.query(`
+    DELETE FROM agent_handoffs WHERE id NOT IN (${placeholders})
+  `).run(...idsToKeep);
 
   return result.changes;
 }

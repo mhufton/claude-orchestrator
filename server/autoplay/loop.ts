@@ -223,6 +223,20 @@ async function autoFormBatches(): Promise<void> {
  * Automatically start batches and individual tickets when slots are available
  */
 async function autoStartBatchesAndTickets(): Promise<void> {
+  const settings = db.getSettings();
+
+  // Serial PR Queue: Only allow 1 PR in review at a time
+  // This prevents CI overload and merge conflicts
+  if (settings.serialPRQueue) {
+    const inReview = db.getTicketsByState('in_review');
+    const batchesInReview = db.getBatchesByState('in_review');
+
+    if (inReview.length > 0 || batchesInReview.length > 0) {
+      console.log(`[autoplay] Serial PR queue enabled - waiting for ${inReview.length} tickets and ${batchesInReview.length} batches in review to merge`);
+      return;
+    }
+  }
+
   // Get current slot usage
   const slotStatus = db.getSlotStatus();
   let availableSlots = slotStatus.filter(s => s.available).length;

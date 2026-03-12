@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Bot, Users, Layers } from 'lucide-react';
+import { X, Bot, Users, Layers, ListOrdered, Workflow } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useTicketsStore } from '../stores/tickets';
 
@@ -15,6 +15,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [maxAgentSlots, setMaxAgentSlots] = useState(settings?.maxAgentSlots ?? 3);
   const [maxParallelReviews, setMaxParallelReviews] = useState(settings?.maxParallelReviews ?? 3);
   const [batchingEnabled, setBatchingEnabled] = useState(settings?.batchingEnabled ?? true);
+  const [serialPRQueue, setSerialPRQueue] = useState(settings?.serialPRQueue ?? false);
+  const [agentMode, setAgentMode] = useState<'parallel-slots' | 'pm-single'>(settings?.agentMode ?? 'parallel-slots');
   const [isSaving, setIsSaving] = useState(false);
 
   // Sync local state when settings change
@@ -23,6 +25,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setMaxAgentSlots(settings.maxAgentSlots);
       setMaxParallelReviews(settings.maxParallelReviews);
       setBatchingEnabled(settings.batchingEnabled ?? true);
+      setSerialPRQueue(settings.serialPRQueue ?? false);
+      setAgentMode(settings.agentMode ?? 'parallel-slots');
     }
   }, [settings]);
 
@@ -36,6 +40,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         maxAgentSlots,
         maxParallelReviews,
         batchingEnabled,
+        serialPRQueue,
+        agentMode,
       }
     });
     // Close after a short delay to show feedback
@@ -147,6 +153,71 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             <p className="text-xs text-gray-400 mt-2">
               Automatically group related tickets by area into single PRs. When disabled, each ticket is processed individually.
             </p>
+          </div>
+
+          {/* Divider */}
+          <div className="border-t border-gray-700 pt-4">
+            <h3 className="text-sm font-semibold text-yellow-400 mb-3">Experimental Features</h3>
+          </div>
+
+          {/* Serial PR Queue */}
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ListOrdered size={16} className="text-yellow-400" />
+                <label className="text-sm font-medium">Serial PR Queue</label>
+              </div>
+              <button
+                onClick={() => setSerialPRQueue(!serialPRQueue)}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  serialPRQueue ? 'bg-yellow-600' : 'bg-gray-600'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${
+                    serialPRQueue ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">
+              Only allow one PR in review at a time. Prevents CI overload and merge conflicts. Recommended for stability.
+            </p>
+          </div>
+
+          {/* Agent Mode */}
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <Workflow size={16} className="text-yellow-400" />
+              <label className="text-sm font-medium">Agent Mode</label>
+            </div>
+            <p className="text-xs text-gray-400 mb-3">
+              Choose between parallel independent agents or a single PM agent that orchestrates work.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setAgentMode('parallel-slots')}
+                className={`flex-1 px-3 py-2 text-xs rounded-lg border transition-colors ${
+                  agentMode === 'parallel-slots'
+                    ? 'bg-yellow-600/20 border-yellow-500 text-yellow-400'
+                    : 'bg-gray-800 border-gray-600 text-gray-400 hover:border-gray-500'
+                }`}
+              >
+                <div className="font-medium">Parallel Slots</div>
+                <div className="text-[10px] opacity-70 mt-1">Multiple independent agents</div>
+              </button>
+              <button
+                onClick={() => setAgentMode('pm-single')}
+                className={`flex-1 px-3 py-2 text-xs rounded-lg border transition-colors ${
+                  agentMode === 'pm-single'
+                    ? 'bg-yellow-600/20 border-yellow-500 text-yellow-400'
+                    : 'bg-gray-800 border-gray-600 text-gray-400 hover:border-gray-500'
+                }`}
+              >
+                <div className="font-medium">PM Single</div>
+                <div className="text-[10px] opacity-70 mt-1">One agent orchestrates all (WIP)</div>
+              </button>
+            </div>
           </div>
 
           {/* Note */}

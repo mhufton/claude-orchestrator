@@ -182,10 +182,20 @@ async function checkForStaleAgents(): Promise<void> {
     if (inactiveMs > STALE_THRESHOLD_MS) {
       const inactiveMinutes = Math.round(inactiveMs / 60000);
 
-      // Check if this agent is waiting in the command queue
+      // Check if this agent has a command actively running (tests, build, lint)
       if (ticket.worktree_slot) {
-        const queueStatus = getQueueStatusForSlot(ticket.worktree_slot);
+        const runningCommand = db.getRunningCommandForSlot(ticket.worktree_slot);
+        if (runningCommand) {
+          // A command is actively running - this explains the silence, not a stall
+          const runningMinutes = runningCommand.started_at
+            ? Math.round((now - new Date(runningCommand.started_at).getTime()) / 60000)
+            : 0;
+          console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: Running ${runningCommand.command_type} command for ${runningMinutes}min - not flagging as stalled`);
+          continue; // Skip stale handling - command is running
+        }
 
+        // Check if waiting in queue
+        const queueStatus = getQueueStatusForSlot(ticket.worktree_slot);
         if (queueStatus?.waiting) {
           // Agent is waiting in queue - this is expected, not a stall
           const queueMinutes = Math.round(queueStatus.waitingMs / 60000);
@@ -212,7 +222,7 @@ async function checkForStaleAgents(): Promise<void> {
         }
       }
 
-      // Not waiting in queue - this is a real stall
+      // Not waiting in queue and no command running - this is a real stall
       const reason = `Agent appears stalled - no activity for ${inactiveMinutes} minutes`;
 
       console.log(`[stale-detector] Ticket #${ticket.github_issue_number}: ${reason}`);

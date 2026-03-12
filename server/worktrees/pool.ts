@@ -1,5 +1,5 @@
 import * as db from '../db';
-import { createWorktree, removeWorktree, getWorktreePath } from './manager';
+import { createWorktree, getWorktreePath, cleanupWorktree } from './manager';
 import { broadcastSlotStatus } from '../ws/handler';
 
 export interface SlotAllocation {
@@ -57,8 +57,10 @@ export async function releaseSlot(slot: number): Promise<void> {
     return;
   }
 
+  // Clean up the worktree immediately (preserves node_modules)
+  // This leaves it in a clean state ready for the next ticket
   try {
-    await removeWorktree(slot);
+    await cleanupWorktree(slot);
   } catch (error) {
     console.warn(`Failed to cleanup worktree for slot ${slot}:`, error);
   }
@@ -69,7 +71,14 @@ export async function releaseSlot(slot: number): Promise<void> {
     db.updateTicket(ticket.id, { worktree_slot: null });
   }
 
+  // Also check batches
+  const batch = db.getBatchBySlot(slot);
+  if (batch) {
+    db.updateBatch(batch.id, { worktree_slot: null });
+  }
+
   broadcastSlotStatus();
+  console.log(`Released slot ${slot} (cleaned up, node_modules preserved)`);
 }
 
 export function getSlotStatus(): Array<{ slot: number; available: boolean; ticketId: number | null }> {

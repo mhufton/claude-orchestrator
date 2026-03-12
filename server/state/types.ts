@@ -55,6 +55,9 @@ export interface Ticket {
   paused: number;  // SQLite uses 0/1 for boolean
   pause_reason: string | null;
   batch_id: number | null;
+  // Error categorization for smart retry
+  error_category: string | null;
+  should_escalate_model: number;  // SQLite uses 0/1 for boolean
   // CI status for live tracking
   ci_status: CIStatus | null;
   ci_checks: string | null;  // JSON array of CICheck
@@ -62,6 +65,9 @@ export interface Ticket {
   // Merge queue
   merge_queue_position: number | null;
   merge_queue_priority: number;
+  // Progress tracking
+  progress_phase: string | null;
+  progress_percent: number;
   created_at: string;
   updated_at: string;
 }
@@ -110,6 +116,14 @@ export interface ReviewContext {
   agentIntent?: string;
   userMessages?: string[];
   hasMergeConflicts?: boolean;
+  failureAnalysis?: {
+    category: string;
+    description: string;
+    errorMessages: string[];
+    repeatedPatterns: string[];
+    suggestions: string[];
+    severity: string;
+  };
 }
 
 export interface ChatMessage {
