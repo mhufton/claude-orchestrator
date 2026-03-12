@@ -1,11 +1,14 @@
 # Claude Orchestrator
 
-A system for managing autonomous Claude AI agents that work on GitHub issues. Point it at a repository, label issues, and watch Claude implement solutions automatically.
+A system for managing autonomous Claude AI agents that work on GitHub issues. Point it at a repository, label issues, and watch Claude implement solutions automatically using a kanban-style workflow.
 
 ## What It Does
 
+![Claude Orchestrator Dashboard](docs/screenshot.jpeg)
+
 - **Monitors GitHub** for issues with specific labels (`claude-ready`, `claude-review`)
 - **Spawns Claude agents** to implement solutions in parallel (3 concurrent slots)
+- **Kanban-style board** tracks issues through Triage → Ready → In Progress → In Review → Done
 - **Creates PRs** and monitors CI status
 - **Auto-merges** when tests pass and review score is high enough
 - **Retries intelligently** with context from previous attempts

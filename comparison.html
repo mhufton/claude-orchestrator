@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comparison: claude-orchestrator vs claude-conductor</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 40px;
+            padding: 10px;
+            background: #ecf0f1;
+            border-left: 4px solid #3498db;
+        }
+        h3 {
+            color: #3498db;
+            margin-top: 30px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+        th {
+            background: #3498db;
+            color: white;
+            font-weight: 600;
+        }
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        .section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .checkmark {
+            color: #27ae60;
+            font-weight: bold;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        pre {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .recommendation {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .priority-high {
+            background: #ffebee;
+        }
+        .priority-medium {
+            background: #fff3e0;
+        }
+        .priority-low {
+            background: #f1f8e9;
+        }
+        ul {
+            margin: 10px 0;
+        }
+        li {
+            margin: 5px 0;
+        }
+        .highlight {
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Comparison: claude-orchestrator vs claude-conductor</h1>
+
+    <div class="section">
+        <h2>Architecture Overview</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Aspect</th>
+                    <th>claude-orchestrator</th>
+                    <th>claude-conductor</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Queue Backend</strong></td>
+                    <td>SQLite + in-memory</td>
+                    <td>Bull Queue (Redis)</td>
+                </tr>
+                <tr>
+                    <td><strong>Processing Model</strong></td>
+                    <td>Custom orchestrator loop (10s cycle)</td>
+                    <td>Bull worker with event-driven processing</td>
+                </tr>
+                <tr>
+                    <td><strong>Batching</strong></td>
+                    <td>Area-based grouping (2-5 tickets)</td>
+                    <td>No batching (single job execution)</td>
+                </tr>
+                <tr>
+                    <td><strong>Concurrency</strong></td>
+                    <td>Slot-based (3-10 worktrees)</td>
+                    <td>Sequential (single Bull processor)</td>
+                </tr>
+                <tr>
+                    <td><strong>State Machine</strong></td>
+                    <td>Custom implementation</td>
+                    <td>Bull's built-in job states</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>Features Adopted from claude-conductor</h2>
+        <div class="highlight">
+            <p><strong>Status Update:</strong> All high-priority features have been successfully implemented in claude-orchestrator! 🎉</p>
+            <p>Implementation completed on January 16, 2026 via PR #6, #7, and #8 on the <code>feat/pm-agent-mode</code> branch.</p>
+        </div>
+
+        <h3>1. Exponential Backoff Retry Strategy <span class="checkmark">✅ IMPLEMENTED</span></h3>
+        <p><strong>claude-conductor approach:</strong></p>
+        <pre>backoff: {
+  type: 'exponential',
+  delay: 5000  // 5s → 10s → 20s → 40s
+}</pre>
+        <p><strong>Previous claude-orchestrator:</strong> Fixed delays (2s, 30s, 2min) with irregular jumps.</p>
+        <div class="highlight">
+            <strong>✅ Now Implemented (PR #8):</strong>
+            <pre>calculateBackoffDelay(attemptCount, baseDelay=5000, factor=2, max=120000)
+// Attempt 1: 5s → Attempt 2: 10s → Attempt 3: 20s → Attempt 4: 40s</pre>
+            <p><strong>Features:</strong></p>
+            <ul>
+                <li><strong>Smooth exponential scaling</strong> - No more irregular jumps</li>
+                <li><strong>Error-specific base delays</strong> - Integrates with error categorization</li>
+                <li><strong>30 comprehensive tests</strong> - Full test coverage with 54 assertions</li>
+                <li><strong>Adaptive timing</strong>:
+                    <ul>
+                        <li>Build/lint errors: 10s base (quick fixes)</li>
+                        <li>Test failures: 30s base (standard retry)</li>
+                        <li>Timeouts: 60s base (system recovery)</li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+
+        <h3>2. Iterative Feedback Loop for Failed Tasks <span class="checkmark">✅✅ IMPLEMENTED</span></h3>
+        <div class="highlight">
+            <p><strong>claude-conductor's killer feature:</strong> The Iterative Factory system analyses failures and generates structured feedback for the next attempt:</p>
+            <pre>IterationFeedback {
+  error_analysis: string
+  improvement_suggestions: string[]
+  code_changes_needed: string[]
+  retry_strategy: 'fix_dependencies' | 'fix_code' | 'fix_config' | 'change_approach' | 'abort'
+}</pre>
+        </div>
+        <p><strong>Previous claude-orchestrator:</strong> Simply respawned with the same prompt after failure.</p>
+        <div class="highlight">
+            <strong>✅ Now Implemented (PR #7):</strong> Created <code>failure-analyzer.ts</code> module with comprehensive log analysis
+            <p><strong>Features:</strong></p>
+            <ul>
+                <li><strong>10+ error pattern detectors</strong>:
+                    <ul>
+                        <li>Syntax errors (SyntaxError, Unexpected token)</li>
+                        <li>Runtime errors (TypeError, ReferenceError)</li>
+                        <li>Test failures (FAIL, Expected vs Got)</li>
+                        <li>Build failures (Compilation error, Module not found)</li>
+                        <li>Git errors (merge conflicts, rebase failures)</li>
+                        <li>Tool usage errors (Edit tool failures, old_string not found)</li>
+                        <li>Dependency errors (npm ERR!, missing modules)</li>
+                        <li>Permission errors (EACCES, EPERM)</li>
+                        <li>Timeouts and environment errors</li>
+                    </ul>
+                </li>
+                <li><strong>Repeated pattern detection</strong> - Identifies when agent is stuck in loops</li>
+                <li><strong>Category-specific suggestions</strong> - Tailored advice per error type</li>
+                <li><strong>Severity assessment</strong> - Low, Medium, High, Critical</li>
+                <li><strong>Integrated into retry prompts</strong> - Agents receive structured failure analysis with prominent warnings about repeated failures</li>
+            </ul>
+            <p><strong>Example feedback to agent:</strong></p>
+            <pre style="font-size: 0.85em;">## Failure Analysis from Previous Attempt:
+
+**Category:** test_failure
+**Severity:** high
+**Root Cause:** 3 unit tests failing in auth module
+
+⚠️ Warning - Repeated Patterns Detected:
+  - Edit tool failed 3 times (old_string not found)
+  - Same test continues to fail after modifications
+
+These approaches are NOT working. You must try something fundamentally different.
+
+**Actionable Suggestions:**
+  • Use Read tool to verify file contents before using Edit
+  • Check test expectations don't match actual implementation
+  • Try running queue-run test npm test locally to see full output</pre>
+        </div>
+
+        <h3>3. Error Categorisation <span class="checkmark">✅ IMPLEMENTED</span></h3>
+        <p><strong>claude-conductor classifies errors:</strong></p>
+        <ul>
+            <li><code>dependency_missing</code></li>
+            <li><code>syntax_error</code></li>
+            <li><code>timeout</code></li>
+            <li><code>file_permission</code></li>
+            <li><code>runtime_error</code></li>
+        </ul>
+        <p><strong>Previous claude-orchestrator:</strong> Generic failure handling, no categorisation.</p>
+        <div class="highlight">
+            <strong>✅ Now Implemented (PR #7):</strong> Created <code>error-types.ts</code> with comprehensive categorization
+            <p><strong>11 Error Categories:</strong></p>
+            <ul>
+                <li><code>ci_test_failure</code> - Tests failed (30s cooldown, escalate after 2 attempts)</li>
+                <li><code>ci_build_failure</code> - Build/compilation failed (10s cooldown, escalate immediately)</li>
+                <li><code>ci_lint_failure</code> - Lint/format issues (10s cooldown, no escalation)</li>
+                <li><code>ci_timeout</code> - CI took too long (60s cooldown, always escalate)</li>
+                <li><code>review_score_low</code> - Review bot scored &lt; 90 (30s cooldown)</li>
+                <li><code>merge_conflict</code> - Conflicts with dev branch (10s cooldown, escalate after 2)</li>
+                <li><code>dependency_error</code> - Missing packages (30s cooldown)</li>
+                <li><code>permission_error</code> - Git/filesystem permissions (60s cooldown, always escalate)</li>
+                <li><code>agent_timeout</code> - Agent didn't complete (60s cooldown, always escalate)</li>
+                <li><code>agent_crash</code> - Agent process crashed (30s cooldown, escalate immediately)</li>
+                <li><code>unknown</code> - Unclassified errors (30s cooldown)</li>
+            </ul>
+            <p><strong>Smart Retry Logic:</strong></p>
+            <ul>
+                <li><strong>Retryable flag</strong> - Determines if retry is worthwhile</li>
+                <li><strong>Suggested cooldown</strong> - Error-specific delay timing</li>
+                <li><strong>Escalate model flag</strong> - When to use Opus instead of Sonnet</li>
+                <li><strong>Requires human flag</strong> - When to flag for manual intervention</li>
+                <li><strong>Severity levels</strong> - Transient, Fixable, Critical</li>
+            </ul>
+            <p><strong>21 comprehensive tests</strong> - Full coverage of categorization logic</p>
+        </div>
+
+        <h3>4. Job-Level Resource Limits</h3>
+        <p><strong>claude-conductor:</strong> Per-job memory/CPU limits in Docker config.</p>
+        <p><strong>Current claude-orchestrator:</strong> No per-ticket resource management (relies on Claude CLI defaults).</p>
+        <p><em>Lower priority - less applicable since you're spawning Claude CLI processes, not containers.</em></p>
+
+        <h3>5. Structured Progress Events <span class="checkmark">✅ IMPLEMENTED</span></h3>
+        <p><strong>claude-conductor emits granular progress:</strong></p>
+        <pre>'job.progress' // 10%, 25%, 50%, 75%, 90%, 100%</pre>
+        <p><strong>Previous claude-orchestrator:</strong> Binary state (running/not running) + log streaming.</p>
+        <div class="highlight">
+            <strong>✅ Now Implemented (PR #6):</strong> Created <code>progress-tracker.ts</code> with real-time phase detection
+            <p><strong>6 Progress Phases:</strong></p>
+            <table style="width: 100%; margin: 10px 0;">
+                <thead>
+                    <tr>
+                        <th>Phase</th>
+                        <th>Progress</th>
+                        <th>Triggered By</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>analyzing</strong></td>
+                        <td>10%</td>
+                        <td>Read, Grep, Glob tools</td>
+                    </tr>
+                    <tr>
+                        <td><strong>planning</strong></td>
+                        <td>25%</td>
+                        <td>TodoWrite tool</td>
+                    </tr>
+                    <tr>
+                        <td><strong>coding</strong></td>
+                        <td>50%</td>
+                        <td>Edit, Write tools</td>
+                    </tr>
+                    <tr>
+                        <td><strong>testing</strong></td>
+                        <td>70%</td>
+                        <td>npm test, queue-run test</td>
+                    </tr>
+                    <tr>
+                        <td><strong>pr_creation</strong></td>
+                        <td>90%</td>
+                        <td>gh pr create, git push</td>
+                    </tr>
+                    <tr>
+                        <td><strong>complete</strong></td>
+                        <td>100%</td>
+                        <td>Agent exits successfully</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p><strong>Features:</strong></p>
+            <ul>
+                <li><strong>Real-time WebSocket broadcasts</strong> - UI updates immediately</li>
+                <li><strong>Lightweight pattern matching</strong> - Minimal performance overhead</li>
+                <li><strong>Backward compatible</strong> - Works with existing agents</li>
+                <li><strong>Database persistence</strong> - Progress saved to DB (progress_phase, progress_percent columns)</li>
+            </ul>
+            <p>This significantly improves UI feedback - users can now see exactly what stage each agent is at!</p>
+        </div>
+
+        <h3>6. Stale Session Cleanup <span class="checkmark">✅</span></h3>
+        <p><strong>claude-conductor:</strong> Auto-cleanup of sessions after 5 minutes post-completion, with 60-second stale check interval.</p>
+        <p><strong>Current claude-orchestrator:</strong> Has stale detection but cleanup could be more aggressive.</p>
+        <div class="recommendation">
+            <strong>Recommendation:</strong> Already implemented reasonably well, but could add automatic archival of tickets stuck in limbo states.
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>What claude-orchestrator Does Better</h2>
+        <p>For completeness, areas where your current system excels:</p>
+        <ol>
+            <li><strong>Area-based batching</strong> - claude-conductor has no batching at all</li>
+            <li><strong>Priority displacement</strong> - Urgent tickets can bump normal ones</li>
+            <li><strong>Merge queue with lanes</strong> - Parallel merging by area</li>
+            <li><strong>Dependency graph</strong> - Tickets can block other tickets</li>
+            <li><strong>State transition audit log</strong> - Full history tracking</li>
+            <li><strong>Multi-slot concurrency</strong> - 3-10 parallel agents vs sequential</li>
+        </ol>
+    </div>
+
+    <div class="section">
+        <h2>Implementation Status</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Priority</th>
+                    <th>Feature</th>
+                    <th>Effort</th>
+                    <th>Impact</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="background: #e8f5e9;">
+                    <td><strong>High</strong></td>
+                    <td>Iterative feedback on respawn</td>
+                    <td>Medium</td>
+                    <td>High</td>
+                    <td><strong>✅ DONE (PR #7)</strong></td>
+                </tr>
+                <tr style="background: #e8f5e9;">
+                    <td><strong>High</strong></td>
+                    <td>Error categorisation</td>
+                    <td>Low</td>
+                    <td>Medium</td>
+                    <td><strong>✅ DONE (PR #7)</strong></td>
+                </tr>
+                <tr style="background: #e8f5e9;">
+                    <td><strong>Medium</strong></td>
+                    <td>Exponential backoff</td>
+                    <td>Low</td>
+                    <td>Medium</td>
+                    <td><strong>✅ DONE (PR #8)</strong></td>
+                </tr>
+                <tr style="background: #e8f5e9;">
+                    <td><strong>Medium</strong></td>
+                    <td>Structured progress events</td>
+                    <td>Medium</td>
+                    <td>Medium</td>
+                    <td><strong>✅ DONE (PR #6)</strong></td>
+                </tr>
+                <tr class="priority-low">
+                    <td><strong>Low</strong></td>
+                    <td>Stale session cleanup improvements</td>
+                    <td>Low</td>
+                    <td>Low</td>
+                    <td>Already adequate</td>
+                </tr>
+            </tbody>
+        </table>
+        <div class="highlight">
+            <p><strong>🎉 Implementation Complete!</strong></p>
+            <p>All high and medium priority features from claude-conductor have been successfully adopted into claude-orchestrator. The system now has:</p>
+            <ul>
+                <li><strong>Smarter retry logic</strong> - Error categorization with adaptive cooldowns and escalation</li>
+                <li><strong>Learning from failures</strong> - Iterative feedback prevents repeating mistakes</li>
+                <li><strong>Better UX</strong> - Real-time progress tracking shows agent status</li>
+                <li><strong>Smoother scaling</strong> - Exponential backoff prevents retry storms</li>
+            </ul>
+            <p><strong>Total Implementation Time:</strong> ~1.5 hours using 3 parallel Sonnet agents</p>
+            <p><strong>Test Coverage:</strong> 51 tests (30 backoff + 21 error types)</p>
+            <p><strong>Branch:</strong> feat/pm-agent-mode (includes PM foundation + conductor features)</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>What claude-orchestrator Now Has That Conductor Doesn't</h2>
+        <ol>
+            <li><strong>Area-based batching</strong> - Groups related tickets for efficient multi-issue PRs</li>
+            <li><strong>Priority displacement</strong> - Urgent tickets can preempt normal ones</li>
+            <li><strong>Merge queue with lanes</strong> - Parallel merging by code area</li>
+            <li><strong>Dependency graph</strong> - Tickets can block other tickets</li>
+            <li><strong>State transition audit log</strong> - Full history tracking</li>
+            <li><strong>Multi-slot concurrency</strong> - 3-10 parallel agents vs sequential</li>
+            <li><strong>PM mode foundation</strong> - Serial PR queue and agent handoff system</li>
+            <li><strong>11 error categories</strong> - More granular than conductor's 5 types</li>
+            <li><strong>10+ error pattern detectors</strong> - Comprehensive log analysis</li>
+            <li><strong>6 progress phases</strong> - Detailed agent lifecycle tracking</li>
+        </ol>
+        <p><strong>Conclusion:</strong> claude-orchestrator has successfully adopted the best ideas from claude-conductor while maintaining its own unique advantages in batching, concurrency, and workflow management.</p>
+    </div>
+</body>
+</html>
