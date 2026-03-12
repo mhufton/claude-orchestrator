@@ -190,6 +190,32 @@ ${context.reviewFeedback}
 `
     : '';
 
+  // Include failure analysis if available
+  const failureAnalysisSection = context.failureAnalysis
+    ? `## Failure Analysis from Previous Attempt:
+
+**Category:** ${context.failureAnalysis.category}
+**Severity:** ${context.failureAnalysis.severity}
+**Root Cause:** ${context.failureAnalysis.description}
+
+${context.failureAnalysis.repeatedPatterns.length > 0
+  ? `**⚠️ Warning - Repeated Patterns Detected:**
+${context.failureAnalysis.repeatedPatterns.map(p => `  - ${p}`).join('\n')}
+
+These approaches are NOT working. You must try something fundamentally different.
+
+`
+  : ''}${context.failureAnalysis.errorMessages.length > 0
+  ? `**Recent Errors:**
+${context.failureAnalysis.errorMessages.slice(0, 3).map((e, i) => `  ${i + 1}. ${e.split('\n')[0]}`).join('\n')}
+
+`
+  : ''}**Actionable Suggestions:**
+${context.failureAnalysis.suggestions.map(s => `  • ${s}`).join('\n')}
+
+`
+    : '';
+
   return `Issue #${ticket.github_issue_number}: "${ticket.title}"
 PR #${prNumber} - Attempt #${ticket.attempt_count}
 
@@ -197,7 +223,7 @@ PR #${prNumber} - Attempt #${ticket.attempt_count}
 
 ${investigationSteps.join('\n')}
 
-${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}## After Investigating, Fix The Issues:
+${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}${failureAnalysisSection}## After Investigating, Fix The Issues:
 
 1. Make the necessary changes
 2. Test locally: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
