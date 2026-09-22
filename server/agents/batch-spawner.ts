@@ -7,6 +7,7 @@ import { broadcastAgentOutput, broadcastAgentTodos, broadcastSlotStatus, type Ag
 import { moveBatchToReview, failBatch } from '../state/machine';
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForMultipleIssues } from '../github/client';
 import type { Batch, Ticket } from '../state/types';
+import { CLAUDE_BIN } from '../config';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
 const ORCHESTRATOR_BIN = join(dirname(dirname(import.meta.dir)), 'bin');
@@ -101,7 +102,7 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[]): Promise<
     console.log(`[batch] Model: ${model}`);
 
     const proc = spawn([
-      '/opt/homebrew/bin/claude',
+      CLAUDE_BIN,
       '--print',
       '--verbose',
       '--model', model,

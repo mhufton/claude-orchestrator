@@ -9,6 +9,7 @@ import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
 import { tryAcquireRespawnLock } from './respawn-coordinator';
 import { ProgressTracker } from './progress-tracker';
+import { MAX_AUTO_ATTEMPTS, CLAUDE_BIN, MODEL_ESCALATION_LADDER } from '../config';
 import type { Ticket } from '../state/types';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
@@ -173,7 +174,7 @@ async function continueAgentConversation(
   console.log(`[agent] Continuing conversation for ticket #${ticket.github_issue_number} with user message`);
 
   const proc = spawn([
-    '/opt/homebrew/bin/claude',  // Full path required - Bun spawn doesn't use env.PATH
+    CLAUDE_BIN,
     '--print',
     '--verbose',
     '--model', model,
@@ -614,7 +615,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
   console.log(`Model: ${model}`);
 
   const proc = spawn([
-    '/opt/homebrew/bin/claude',  // Full path required - Bun spawn doesn't use env.PATH
+    CLAUDE_BIN,
     '--print',
     '--verbose',
     '--model', model,
@@ -804,8 +805,6 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     });
   } else {
     // Agent finished but no PR
-    const MAX_AUTO_ATTEMPTS = 3; // Unified with pr-watcher.ts
-
     if (exitCode !== 0 && ticket.attempt_count < MAX_AUTO_ATTEMPTS) {
       // Non-zero exit code - auto-respawn (self-healing)
       // Check if another component already triggered a respawn
