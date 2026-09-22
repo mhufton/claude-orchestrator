@@ -1,3 +1,6 @@
+// PRs target main; the dev branch was retired with the single-branch pipeline.
+export const BASE_BRANCH = process.env.BASE_BRANCH || 'main';
+
 export interface Config {
   github: {
     token: string;
@@ -51,3 +54,39 @@ export function loadConfig(): Config {
     },
   };
 }
+
+// Review-bot score gate. Lives here, not in pr-watcher, so the agent prompt can
+// state the real bar without importing the watcher (prompts <- spawner <- watcher).
+export const SCORE_THRESHOLD = parseInt(process.env.SCORE_THRESHOLD || '98', 10);
+
+// Auto-attempts before a ticket is parked for a human. Read by pr-watcher (circuit
+// breaker) and spawner (self-heal) — two copies of this cap can silently disagree.
+export const MAX_AUTO_ATTEMPTS = parseInt(process.env.MAX_AUTO_ATTEMPTS || '3', 10);
+
+// Model per retry attempt (index = attempt_count - 1). A retry re-runs the same
+// ticket with more capability rather than the same model that already failed it.
+// Shorter than MAX_AUTO_ATTEMPTS on purpose — spawner clamps to the last rung.
+export const MODEL_ESCALATION_LADDER: readonly ('opus' | 'sonnet')[] = ['sonnet', 'opus'];
+
+// Absolute path required: Bun.spawn throws ENOENT rather than falling back to PATH,
+// and a dangling path fails silently (see the /opt/homebrew hardcode this replaces).
+export const CLAUDE_BIN: string = (() => {
+  const candidates = [
+    process.env.CLAUDE_BIN,
+    Bun.which('claude'),
+    `${process.env.HOME}/.local/bin/claude`,
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+  ].filter((p): p is string => Boolean(p));
+
+  for (const path of candidates) {
+    try {
+      if (Bun.spawnSync([path, '--version']).success) return path;
+    } catch {
+      // next candidate
+    }
+  }
+  throw new Error(
+    `Could not find a working \`claude\` binary. Tried: ${candidates.join(', ')}. Set CLAUDE_BIN.`
+  );
+})();
