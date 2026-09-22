@@ -1,4 +1,4 @@
-import { loadConfig } from './config';
+import { loadConfig, DB_PATH } from './config';
 import {
   initDatabase,
   getAllTickets,
@@ -48,7 +48,7 @@ try {
 }
 
 // Initialize database
-initDatabase('./orchestrator.db');
+initDatabase(DB_PATH);
 console.log('Database initialized');
 
 // Load persisted todos from database

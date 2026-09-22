@@ -8,6 +8,8 @@ export interface ReviewScore {
     security?: number;
   };
   feedback?: string;
+  /** id of the bot comment the score was parsed from — attributes a score to a dispatch. */
+  commentId: number;
 }
 
 /** Feedback goes into agent prompts; keep it bounded. */
@@ -137,7 +139,8 @@ export async function parseReviewScore(prNumber: number): Promise<ReviewScore | 
   return {
     total,
     breakdown: Object.keys(breakdown).length > 0 ? breakdown : undefined,
-    feedback
+    feedback,
+    commentId: comment.id
   };
 }
 

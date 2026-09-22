@@ -1,11 +1,17 @@
 import { Database } from 'bun:sqlite';
 import { readFileSync } from 'fs';
-import { join } from 'path';
-import type { Ticket, AgentLog, TicketState, ChatMessage, Batch, BatchState, MergeQueueEntry, MergeQueueStatus } from '../state/types';
+import { join, isAbsolute } from 'path';
+import type { Ticket, AgentLog, TicketState, ChatMessage, Batch, BatchState, MergeQueueEntry, MergeQueueStatus, Dispatch, DispatchOutcome, DispatchPhase, RouterMode } from '../state/types';
 
 let db: Database;
 
-export function initDatabase(dbPath: string = './orchestrator.db'): void {
+export function initDatabase(dbPath: string): void {
+  // A relative path resolves against process.cwd(), which silently gives a
+  // different process a different, empty database (config.ts DB_PATH exists so
+  // nobody has to pass a relative path here again).
+  if (!isAbsolute(dbPath)) {
+    throw new Error(`initDatabase requires an absolute path, got: "${dbPath}"`);
+  }
   db = new Database(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
@@ -386,6 +392,49 @@ function runMigrations(): void {
       db.exec('ALTER TABLE agent_logs ADD COLUMN attempt_number INTEGER');
     }
   }
+
+  // Migration: Create dispatches table (one row per spawn event; see insertDispatch
+  // for why attempt_number cannot be the key).
+  const dispatchesTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='dispatches'").all();
+  if (dispatchesTable.length === 0) {
+    console.log('Migrating database: creating dispatches table');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        batch_id INTEGER,
+        attempt_number INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        model TEXT NOT NULL,
+        rule TEXT NOT NULL,
+        confidence REAL,
+        reason TEXT,
+        fallback INTEGER NOT NULL DEFAULT 0,
+        mode TEXT NOT NULL,
+        features TEXT NOT NULL,
+        router_version TEXT,
+        risk_list_sha TEXT,
+        dispatched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        head_sha_before TEXT,
+        finished_at TEXT,
+        exit_code INTEGER,
+        head_sha_after TEXT,
+        pr_number INTEGER,
+        score INTEGER,
+        score_comment_id INTEGER,
+        scored_at TEXT,
+        cost_usd REAL,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        num_turns INTEGER,
+        duration_ms INTEGER,
+        outcome TEXT
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_dispatches_ticket ON dispatches(ticket_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_dispatches_batch ON dispatches(batch_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_dispatches_ticket_sha ON dispatches(ticket_id, head_sha_after)');
+  }
 }
 
 export function getDatabase(): Database {
@@ -479,11 +528,20 @@ export function deleteTicket(id: number): boolean {
 }
 
 // Agent log operations
+
+/** `type='text'` rows dominate agent_logs' size (256KB npm-warn chunks captured
+ * whole); everything else (JSON stream events) is already bounded by the CLI. */
+const TEXT_LOG_MAX_CHARS = 4096;
+
 export function insertLog(ticketId: number, type: string, content: string, model?: string, attemptNumber?: number): void {
+  const stored = type === 'text' && content.length > TEXT_LOG_MAX_CHARS
+    ? `${content.slice(0, TEXT_LOG_MAX_CHARS)}\n...[truncated, ${content.length} chars total]`
+    : content;
+
   db.query(`
     INSERT INTO agent_logs (ticket_id, type, content, model, attempt_number)
     VALUES (?, ?, ?, ?, ?)
-  `).run(ticketId, type, content, model ?? null, attemptNumber ?? null);
+  `).run(ticketId, type, stored, model ?? null, attemptNumber ?? null);
 }
 
 export function getLogsForTicket(ticketId: number, limit: number = 100): AgentLog[] {
@@ -497,6 +555,130 @@ export function getLogsForTicket(ticketId: number, limit: number = 100): AgentLo
 
 export function clearLogsForTicket(ticketId: number): void {
   db.query('DELETE FROM agent_logs WHERE ticket_id = ?').run(ticketId);
+}
+
+// ============================================
+// Dispatch operations
+//
+// One row per spawn event (see the Dispatch type: attempt_number is recorded but
+// is not the key — attempt_count gets reset independently of the spawn history).
+// ============================================
+
+export interface CreateDispatchInput {
+  ticket_id: number;
+  batch_id?: number | null;
+  attempt_number: number;
+  phase: DispatchPhase;
+  model: 'opus' | 'sonnet';
+  rule: string;
+  confidence?: number | null;
+  reason?: string | null;
+  fallback?: boolean;
+  mode: RouterMode;
+  features: string;
+  router_version?: string | null;
+  risk_list_sha?: string | null;
+  head_sha_before?: string | null;
+}
+
+export function insertDispatch(input: CreateDispatchInput): Dispatch {
+  const result = db.query(`
+    INSERT INTO dispatches (
+      ticket_id, batch_id, attempt_number, phase, model, rule, confidence, reason,
+      fallback, mode, features, router_version, risk_list_sha, head_sha_before
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.ticket_id,
+    input.batch_id ?? null,
+    input.attempt_number,
+    input.phase,
+    input.model,
+    input.rule,
+    input.confidence ?? null,
+    input.reason ?? null,
+    input.fallback ? 1 : 0,
+    input.mode,
+    input.features,
+    input.router_version ?? null,
+    input.risk_list_sha ?? null,
+    input.head_sha_before ?? null
+  );
+
+  return getDispatchById(Number(result.lastInsertRowid))!;
+}
+
+export function getDispatchById(id: number): Dispatch | undefined {
+  return db.query('SELECT * FROM dispatches WHERE id = ?').get(id) as Dispatch | undefined;
+}
+
+export interface DispatchOutcomeInput {
+  finished_at?: string;
+  exit_code: number | null;
+  head_sha_after: string | null;
+  cost_usd?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  num_turns?: number | null;
+  duration_ms?: number | null;
+  model?: string | null;  // the model modelUsage actually reports, if it differs
+  outcome?: DispatchOutcome | null;
+}
+
+export function completeDispatch(id: number, outcome: DispatchOutcomeInput): void {
+  db.query(`
+    UPDATE dispatches SET
+      finished_at = ?,
+      exit_code = ?,
+      head_sha_after = ?,
+      cost_usd = ?,
+      input_tokens = ?,
+      output_tokens = ?,
+      num_turns = ?,
+      duration_ms = ?,
+      model = COALESCE(?, model),
+      outcome = ?
+    WHERE id = ?
+  `).run(
+    outcome.finished_at ?? new Date().toISOString(),
+    outcome.exit_code,
+    outcome.head_sha_after,
+    outcome.cost_usd ?? null,
+    outcome.input_tokens ?? null,
+    outcome.output_tokens ?? null,
+    outcome.num_turns ?? null,
+    outcome.duration_ms ?? null,
+    outcome.model ?? null,
+    outcome.outcome ?? null,
+    id
+  );
+}
+
+export function getDispatchesForTicket(ticketId: number): Dispatch[] {
+  return db.query(`
+    SELECT * FROM dispatches WHERE ticket_id = ? ORDER BY id DESC
+  `).all(ticketId) as Dispatch[];
+}
+
+/**
+ * Find the dispatch whose attempt actually produced the given commit, for a ticket.
+ * This is the reliable join for score-per-attempt: GitHub gives score-per-SHA, and
+ * pushes don't map to attempts 1:1 (branch-updater merges, and 31% of attempts push
+ * nothing at all).
+ */
+export function getDispatchByTicketAndSha(ticketId: number, headSha: string): Dispatch | undefined {
+  return db.query(`
+    SELECT * FROM dispatches
+    WHERE ticket_id = ? AND head_sha_after = ?
+    ORDER BY id DESC LIMIT 1
+  `).get(ticketId, headSha) as Dispatch | undefined;
+}
+
+export function recordDispatchScore(id: number, score: number, scoreCommentId: number | null): void {
+  db.query(`
+    UPDATE dispatches SET score = ?, score_comment_id = ?, scored_at = CURRENT_TIMESTAMP, outcome = 'scored'
+    WHERE id = ?
+  `).run(score, scoreCommentId, id);
 }
 
 // Sync state operations

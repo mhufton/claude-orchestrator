@@ -12,6 +12,26 @@ import { CLAUDE_BIN } from '../config';
 // Path to orchestrator bin directory (for queue-run and other tools)
 const ORCHESTRATOR_BIN = join(dirname(dirname(import.meta.dir)), 'bin');
 
+/** Local HEAD of the worktree's branch, or null if it can't be read. */
+async function getHeadSha(worktreePath: string): Promise<string | null> {
+  try {
+    const { $ } = await import('bun');
+    const result = await $`git rev-parse HEAD`.cwd(worktreePath).quiet();
+    return result.text().trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Shape of the CLI's terminal `result` stream-json event, fields relevant to dispatch accounting. */
+interface StreamResultEvent {
+  total_cost_usd?: number;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  num_turns?: number;
+  duration_ms?: number;
+  modelUsage?: Record<string, unknown>;
+}
+
 // Track running batch agents
 const runningBatchAgents = new Map<number, Subprocess>();
 
@@ -96,6 +116,23 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[], context?:
     const worktreePath = getWorktreePath(slot);
     const prompt = buildBatchAgentPrompt(batch, tickets, context);
     const model = selectBatchModel(tickets);
+    const headShaBefore = await getHeadSha(worktreePath);
+
+    // Dispatch recording: represented by the batch's first ticket, since a batch PR
+    // is one branch shared across all its tickets (see spawner.ts for the single-
+    // ticket case). PR 1 records and decides nothing.
+    const dispatch = db.insertDispatch({
+      ticket_id: tickets[0].id,
+      batch_id: batch.id,
+      attempt_number: batch.attempt_count,
+      phase: 'implement',
+      model,
+      rule: 'STATIC',
+      fallback: false,
+      mode: 'off',
+      features: '{}',
+      head_sha_before: headShaBefore,
+    });
 
     console.log(`[batch] Spawning agent for batch ${batch.id} (${tickets.length} tickets) in slot ${slot}`);
     console.log(`[batch] Worktree: ${worktreePath}`);
@@ -129,6 +166,7 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[], context?:
     // Stream stdout to all tickets in batch
     const stdoutReader = proc.stdout.getReader();
     const decoder = new TextDecoder();
+    let resultEvent: StreamResultEvent | null = null;
 
     try {
       while (true) {
@@ -141,6 +179,10 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[], context?:
         for (const line of lines) {
           try {
             const event = JSON.parse(line);
+
+            if (event.type === 'result') {
+              resultEvent = event;
+            }
 
             // Log to database for all tickets in batch
             for (const ticket of tickets) {
@@ -180,6 +222,19 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[], context?:
     // Wait for process to complete
     const exitCode = await proc.exited;
     runningBatchAgents.delete(batch.id);
+
+    const headShaAfter = await getHeadSha(worktreePath);
+    const actualModel = resultEvent?.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
+    db.completeDispatch(dispatch.id, {
+      exit_code: exitCode,
+      head_sha_after: headShaAfter && headShaAfter !== headShaBefore ? headShaAfter : null,
+      cost_usd: resultEvent?.total_cost_usd ?? null,
+      input_tokens: resultEvent?.usage?.input_tokens ?? null,
+      output_tokens: resultEvent?.usage?.output_tokens ?? null,
+      num_turns: resultEvent?.num_turns ?? null,
+      duration_ms: resultEvent?.duration_ms ?? null,
+      model: actualModel ?? null,
+    });
 
     console.log(`[batch] Agent for batch ${batch.id} exited with code ${exitCode}`);
 

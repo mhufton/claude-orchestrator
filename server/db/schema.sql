@@ -184,6 +184,40 @@ CREATE TABLE IF NOT EXISTS agent_handoffs (
   cleared_at TEXT            -- When /clear happened (null if not yet cleared)
 );
 
+-- Dispatches (one row per spawn event -- see server/db/index.ts insertDispatch for
+-- why attempt_number is recorded but is not the key)
+CREATE TABLE IF NOT EXISTS dispatches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  batch_id INTEGER,
+  attempt_number INTEGER NOT NULL,
+  phase TEXT NOT NULL,
+  model TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  confidence REAL,
+  reason TEXT,
+  fallback INTEGER NOT NULL DEFAULT 0,
+  mode TEXT NOT NULL,
+  features TEXT NOT NULL,
+  router_version TEXT,
+  risk_list_sha TEXT,
+  dispatched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  head_sha_before TEXT,
+  finished_at TEXT,
+  exit_code INTEGER,
+  head_sha_after TEXT,
+  pr_number INTEGER,
+  score INTEGER,
+  score_comment_id INTEGER,
+  scored_at TEXT,
+  cost_usd REAL,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  num_turns INTEGER,
+  duration_ms INTEGER,
+  outcome TEXT
+);
+
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_tickets_state ON tickets(state);
 CREATE INDEX IF NOT EXISTS idx_tickets_issue_number ON tickets(github_issue_number);
@@ -206,3 +240,6 @@ CREATE INDEX IF NOT EXISTS idx_tickets_batch_id ON tickets(batch_id);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_status ON merge_queue(status);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_position ON merge_queue(position, lane);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_ticket ON merge_queue(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_ticket ON dispatches(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_batch ON dispatches(batch_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_ticket_sha ON dispatches(ticket_id, head_sha_after);
