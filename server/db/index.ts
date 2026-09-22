@@ -381,6 +381,17 @@ function runMigrations(): void {
     db.exec('ALTER TABLE tickets ADD COLUMN last_checked_sha TEXT');
   }
 
+  // Migration: Add unresolved_thread_count, so the router (decide(), R3) has a
+  // local-DB signal for "review threads are still open" without a network call —
+  // evaluateMergeBlockers already computes this per poll but only kept it in an
+  // ephemeral local variable until now.
+  const columnsForThreadCount = db.query("PRAGMA table_info(tickets)").all() as Array<{ name: string }>;
+  const columnNamesForThreadCount = new Set(columnsForThreadCount.map(c => c.name));
+  if (!columnNamesForThreadCount.has('unresolved_thread_count')) {
+    console.log('Migrating database: adding unresolved_thread_count column');
+    db.exec('ALTER TABLE tickets ADD COLUMN unresolved_thread_count INTEGER DEFAULT 0');
+  }
+
   // Migration: Add model + attempt_number to agent_logs, so the model a run used
   // is queryable against tickets.attempt_count / current_score via ticket_id.
   const agentLogsTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_logs'").all();
@@ -498,7 +509,13 @@ export function updateTicket(id: number, changes: Partial<Ticket>): Ticket | und
     'handoff_notes', 'paused', 'pause_reason', 'batch_id',
     'ci_status', 'ci_checks', 'ci_updated_at',
     'merge_queue_position', 'merge_queue_priority',
-    'progress_phase', 'progress_percent'
+    'progress_phase', 'progress_percent', 'unresolved_thread_count',
+    // Pre-existing gap: pr-watcher.ts has written these on every respawn since
+    // error categorization shipped, but they were never whitelisted here, so the
+    // writes silently no-op'd and error_category/should_escalate_model have been
+    // stuck null in production. R5 (router.ts) needs error_category to actually
+    // persist to tell an infra retry from a quality one.
+    'error_category', 'should_escalate_model', 'last_checked_sha'
   ];
 
   const updates: string[] = [];

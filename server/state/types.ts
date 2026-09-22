@@ -60,6 +60,8 @@ export interface Ticket {
   should_escalate_model: number;  // SQLite uses 0/1 for boolean
   // Respawn tracking (prevent double-respawn on same commit)
   last_checked_sha: string | null;
+  // Open review threads as of the last PR watch poll (router feature R3)
+  unresolved_thread_count: number;
   // CI status for live tracking
   ci_status: CIStatus | null;
   ci_checks: string | null;  // JSON array of CICheck

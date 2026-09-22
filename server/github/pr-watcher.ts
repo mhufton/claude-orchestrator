@@ -5,7 +5,7 @@ import { getReviewFeedback } from './score-parser';
 import { broadcastTicketUpdated, broadcastSlotStatus, broadcastChatMessagesDelivered } from '../ws/handler';
 import { spawnAgent } from '../agents/spawner';
 import { spawnBatchAgent, isBatchAgentRunning } from '../agents/batch-spawner';
-import { acquireSlot } from '../worktrees/pool';
+import { acquireSlot, releaseSlot } from '../worktrees/pool';
 import { recordPRWatchStart, recordPRWatchComplete, addActivity, setPRWatchInterval } from '../poll-status';
 import { tryAcquireRespawnLock } from '../agents/respawn-coordinator';
 import { addToQueue, isInQueue } from '../merge-queue/manager';
@@ -14,13 +14,40 @@ import { categorizeError } from '../agents/error-types';
 import { analyzeAgentFailure } from '../agents/failure-analyzer';
 import { evaluateMergeBlockers } from './merge-blockers';
 import { getPRReviewContext } from './review-context';
-import { MAX_AUTO_ATTEMPTS } from '../config';
+import { MAX_AUTO_ATTEMPTS, loadConfig } from '../config';
 import type { Ticket, Batch, ReviewContext, UnresolvedThreadContext } from '../state/types';
 
 interface WatchResult {
   action: 'waiting' | 'back_to_progress' | 'completed' | 'error' | 'respawned';
   reason?: string;
   score?: number;
+}
+
+/**
+ * Circuit-breaker trip, §2.5: a parked ticket used to keep its worktree slot and
+ * claude-ready label forever (#2102, #1966, #1969 sat flagged for eight months) —
+ * the lane went dead and nothing else could claim the ticket or the slot. Swapping
+ * the label surfaces it in GitHub instead of a needs_attention column nobody
+ * queries, and one comment says what was tried so the "why" survives the handoff.
+ */
+async function relabelAndCommentForHumanHandoff(
+  issueNumber: number,
+  attempts: number,
+  lastScore: number | null,
+  blockers: string[]
+): Promise<void> {
+  const claudeReadyLabel = loadConfig().github.claudeReadyLabel;
+
+  await github.removeLabelFromIssue(issueNumber, claudeReadyLabel);
+  await github.addLabelToIssue(issueNumber, 'needs-human');
+
+  const scoreLine = lastScore !== null ? `Last review score: ${lastScore}.` : 'No review score recorded.';
+  await github.addCommentToIssue(
+    issueNumber,
+    `Auto-attempts exhausted (${attempts}/${MAX_AUTO_ATTEMPTS}). ${scoreLine}\n\n` +
+      `Blocker(s): ${blockers.join('; ') || 'none recorded'}.\n\n` +
+      `Swapped \`${claudeReadyLabel}\` for \`needs-human\` — this needs a person before it can be picked up again.`
+  );
 }
 
 /**
@@ -101,20 +128,33 @@ async function respawnForIssue(
 
   // CIRCUIT BREAKER: Check if we've exceeded max attempts
   if (ticket.attempt_count >= MAX_AUTO_ATTEMPTS) {
-    console.log(`PR #${ticket.pr_number}: Maximum auto-attempts (${MAX_AUTO_ATTEMPTS}) reached. Flagging for human intervention.`);
+    console.log(`PR #${ticket.pr_number}: Maximum auto-attempts (${MAX_AUTO_ATTEMPTS}) reached. Handing back to a human.`);
+
+    if (ticket.worktree_slot) {
+      await releaseSlot(ticket.worktree_slot);
+    }
+
+    try {
+      await relabelAndCommentForHumanHandoff(ticket.github_issue_number, ticket.attempt_count, ticket.current_score, issues);
+    } catch (err) {
+      console.error(`Failed to hand ticket #${ticket.github_issue_number} back to a human on GitHub:`, err);
+    }
 
     db.updateTicket(ticket.id, {
+      worktree_slot: null,
       needs_attention: 1,
       attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
     });
     broadcastTicketUpdated(ticket.id, {
+      worktree_slot: null,
       needs_attention: 1,
       attention_reason: `Stuck after ${ticket.attempt_count} attempts. Issues: ${issues.join('; ')}`
     });
+    broadcastSlotStatus();
 
     return {
       action: 'error',
-      reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - requires human intervention`
+      reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - handed back to a human`
     };
   }
 
@@ -328,6 +368,11 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     if (threadOutcome.resolved.length > 0) {
       addActivity('pr_check', `Resolved ${threadOutcome.resolved.length} review thread(s) on PR #${ticket.pr_number}`);
     }
+
+    // Router feature R3 needs "threads are still open" as a local-DB signal — this
+    // is the only place that count exists today (evaluateMergeBlockers computes it
+    // fresh per poll and otherwise throws it away).
+    db.updateTicket(ticket.id, { unresolved_thread_count: threadOutcome.stillOpen.length });
 
     if (score) {
       db.updateTicket(ticket.id, { current_score: score.total });
@@ -578,14 +623,31 @@ async function respawnBatchForIssues(batch: Batch, issues: string[]): Promise<Wa
     return { action: 'waiting', reason: 'Batch agent already running' };
   }
 
+  const tickets = db.getTicketsInBatch(batch.id);
+
   if (batch.attempt_count >= MAX_AUTO_ATTEMPTS) {
     const reason = `Stuck after ${batch.attempt_count} attempts. Issues: ${issues.join('; ')}`;
-    console.log(`[pr-watcher] Batch ${batch.id}: max auto-attempts (${MAX_AUTO_ATTEMPTS}) reached, flagging for human intervention`);
-    db.updateBatch(batch.id, { needs_attention: 1, attention_reason: reason });
-    return { action: 'error', reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - requires human intervention` };
+    console.log(`[pr-watcher] Batch ${batch.id}: max auto-attempts (${MAX_AUTO_ATTEMPTS}) reached. Handing back to a human.`);
+
+    if (batch.worktree_slot) {
+      await releaseSlot(batch.worktree_slot);
+    }
+
+    // One branch, one PR, all tickets in the batch — every issue in it gets the
+    // same relabel + comment, same as the single-ticket breaker trip.
+    for (const t of tickets) {
+      try {
+        await relabelAndCommentForHumanHandoff(t.github_issue_number, batch.attempt_count, batch.current_score, issues);
+      } catch (err) {
+        console.error(`Failed to hand ticket #${t.github_issue_number} (batch ${batch.id}) back to a human on GitHub:`, err);
+      }
+    }
+
+    db.updateBatch(batch.id, { worktree_slot: null, needs_attention: 1, attention_reason: reason });
+    broadcastSlotStatus();
+    return { action: 'error', reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - handed back to a human` };
   }
 
-  const tickets = db.getTicketsInBatch(batch.id);
   if (tickets.length === 0) {
     return { action: 'error', reason: 'Batch has no tickets to respawn for' };
   }
