@@ -243,15 +243,21 @@ export async function archiveTicket(ticketId: number): Promise<TransitionResult>
     await releaseSlot(ticket.worktree_slot);
   }
 
-  // Move to done
+  // Move to done. Clearing needs_attention is part of completing: a warning about
+  // in-flight state that survives into `done` can never be cleared by normal flow
+  // and warns forever.
   db.updateTicket(ticketId, {
     state: 'done',
-    worktree_slot: null
+    worktree_slot: null,
+    needs_attention: 0,
+    attention_reason: null
   });
 
   broadcastTicketUpdated(ticketId, {
     state: 'done',
-    worktree_slot: null
+    worktree_slot: null,
+    needs_attention: 0,
+    attention_reason: null
   });
 
   broadcastSlotStatus();
@@ -606,20 +612,25 @@ export async function completeBatch(batchId: number): Promise<BatchTransitionRes
     await releaseSlot(batch.worktree_slot);
   }
 
-  // Move ALL tickets to done
+  // Move ALL tickets to done. See archiveTicket: a needs_attention flag must not
+  // survive into `done`.
   for (const ticket of tickets) {
     db.updateTicket(ticket.id, {
       state: 'done',
       worktree_slot: null,
       pr_number: batch.pr_number,
-      pr_url: batch.pr_url
+      pr_url: batch.pr_url,
+      needs_attention: 0,
+      attention_reason: null
     });
 
     broadcastTicketUpdated(ticket.id, {
       state: 'done',
       worktree_slot: null,
       pr_number: batch.pr_number,
-      pr_url: batch.pr_url
+      pr_url: batch.pr_url,
+      needs_attention: 0,
+      attention_reason: null
     });
 
     // Log state transition

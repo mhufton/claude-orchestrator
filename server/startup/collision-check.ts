@@ -216,6 +216,13 @@ export function flagCollisionsForAttention(issues: CollisionIssue[]): number {
   for (const issue of issues) {
     if (issue.autoFix) continue; // Already handled
 
+    const current = db.getTicketById(issue.ticketId);
+    if (!current) continue;
+    if (current.state === 'done') {
+      console.log(`[collision-check] Not flagging ticket ${issue.ticketId} (#${issue.issueNumber}) - already done: ${issue.message}`);
+      continue;
+    }
+
     try {
       db.updateTicket(issue.ticketId, {
         needs_attention: 1,
