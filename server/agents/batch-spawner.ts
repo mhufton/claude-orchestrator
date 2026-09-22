@@ -2,7 +2,7 @@ import { spawn, type Subprocess } from 'bun';
 import { join, dirname } from 'path';
 import * as db from '../db';
 import { getWorktreePath } from '../worktrees/manager';
-import { buildBatchAgentPrompt } from './prompts';
+import { buildBatchAgentPrompt } from './prompts.holistic';
 import { broadcastAgentOutput, broadcastAgentTodos, broadcastSlotStatus, type AgentTodo } from '../ws/handler';
 import { moveBatchToReview, failBatch } from '../state/machine';
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForMultipleIssues } from '../github/client';

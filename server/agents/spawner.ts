@@ -2,7 +2,7 @@ import { spawn, type Subprocess } from 'bun';
 import { join, dirname } from 'path';
 import * as db from '../db';
 import { getWorktreePath } from '../worktrees/manager';
-import { buildAgentPrompt } from './prompts';
+import { buildAgentPrompt } from './prompts.holistic';
 import { broadcastAgentOutput, broadcastTicketUpdated, broadcastAgentTodos, broadcastChatMessagesDelivered, broadcastAgentContext, broadcastSlotStatus, broadcastProgressUpdate, type AgentTodo } from '../ws/handler';
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForIssue, getIssue, getPR } from '../github/client';
 import { getRetryContext } from '../github/pr-watcher';
