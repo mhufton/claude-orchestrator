@@ -77,6 +77,43 @@ const agentSessionIds = new Map<number, string>();
 // This is a synchronous check - if spawn is in progress, skip
 const spawningAgents = new Set<number>();
 
+/**
+ * Drain the agent's stderr into agent_logs. Unread, the pipe also fills and
+ * stalls the child, so this is a drain as much as a log. Fire-and-forget.
+ */
+function pipeStderrToLogs(ticketId: number, proc: Subprocess): void {
+  const stream = proc.stderr;
+  if (!stream || typeof stream === 'number') return;
+
+  void (async () => {
+    const reader = (stream as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          console.error(`[agent-stderr ${ticketId}] ${line}`);
+          db.insertLog(ticketId, 'stderr', line);
+          broadcastAgentOutput(ticketId, { type: 'stderr', content: line });
+        }
+      }
+      if (buffer.trim()) {
+        console.error(`[agent-stderr ${ticketId}] ${buffer}`);
+        db.insertLog(ticketId, 'stderr', buffer);
+        broadcastAgentOutput(ticketId, { type: 'stderr', content: buffer });
+      }
+    } catch (error) {
+      console.error(`[agent-stderr ${ticketId}] reader error:`, error);
+    }
+  })();
+}
+
 export interface AgentResult {
   success: boolean;
   exitCode: number | null;
@@ -193,6 +230,7 @@ async function continueAgentConversation(
       WORKTREE_SLOT: String(ticket.worktree_slot),
       ORCHESTRATOR_URL: `http://localhost:${process.env.PORT || 3456}`
     }
+  pipeStderrToLogs(ticket.id, proc);
   });
 
   runningAgents.set(ticket.id, proc);
@@ -635,6 +673,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     }
   });
 
+  pipeStderrToLogs(ticket.id, proc);
   runningAgents.set(ticket.id, proc);
 
   // Initialize progress tracker for this ticket
