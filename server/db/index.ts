@@ -570,6 +570,19 @@ export function getLogsForTicket(ticketId: number, limit: number = 100): AgentLo
   `).all(ticketId, limit) as AgentLog[];
 }
 
+// Filtered by type so a burst of other log rows (stream-json events, in the
+// hundreds on a long run) can't crowd the signal out of a plain top-N fetch.
+// Ordered by id, not timestamp: CURRENT_TIMESTAMP is second-resolution and rows
+// from the same burst can share one, which breaks recency ordering.
+export function getRecentLogsByType(ticketId: number, type: string, limit: number = 10): AgentLog[] {
+  return db.query(`
+    SELECT * FROM agent_logs
+    WHERE ticket_id = ? AND type = ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(ticketId, type, limit) as AgentLog[];
+}
+
 export function clearLogsForTicket(ticketId: number): void {
   db.query('DELETE FROM agent_logs WHERE ticket_id = ?').run(ticketId);
 }

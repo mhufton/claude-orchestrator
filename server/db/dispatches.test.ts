@@ -11,6 +11,7 @@ import {
   recordDispatchScore,
   insertLog,
   getLogsForTicket,
+  getRecentLogsByType,
 } from './index';
 
 function makeTicket(issueNumber: number) {
@@ -205,5 +206,38 @@ describe('agent_logs text truncation (4KB cap)', () => {
 
     const [row] = getLogsForTicket(ticket.id, 1);
     expect(row.content).toBe(longJson);
+  });
+});
+
+describe('getRecentLogsByType', () => {
+  test('filters out other row types so they cannot crowd out the signal', () => {
+    const ticket = makeTicket(2004);
+    insertLog(ticket.id, 'assistant', JSON.stringify({ type: 'assistant' }));
+    insertLog(ticket.id, 'stderr', 'ENOENT: no such file');
+    insertLog(ticket.id, 'assistant', JSON.stringify({ type: 'assistant' }));
+    insertLog(ticket.id, 'stderr', 'permission denied');
+
+    const rows = getRecentLogsByType(ticket.id, 'stderr', 10);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.type === 'stderr')).toBe(true);
+  });
+
+  test('returns most-recent-first, capped at limit', () => {
+    const ticket = makeTicket(2005);
+    for (let i = 0; i < 5; i++) {
+      insertLog(ticket.id, 'stderr', `line ${i}`);
+    }
+
+    const rows = getRecentLogsByType(ticket.id, 'stderr', 2);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].content).toBe('line 4');
+    expect(rows[1].content).toBe('line 3');
+  });
+
+  test('empty when no rows of that type exist', () => {
+    const ticket = makeTicket(2006);
+    insertLog(ticket.id, 'text', 'not stderr');
+
+    expect(getRecentLogsByType(ticket.id, 'stderr', 10)).toHaveLength(0);
   });
 });

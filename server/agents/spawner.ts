@@ -945,8 +945,12 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
       // Use error categorization cooldown as base delay if available
       // Error category is set by pr-watcher when it detects specific failure types
       const { categorizeError } = await import('./error-types');
+      // Without recentErrors, categorizeError's keyword matching can never fire on
+      // this path and every self-heal lands on the generic agent_crash bucket.
+      const recentStderr = db.getRecentLogsByType(ticket.id, 'stderr', 10).map(log => log.content);
       const categorization = categorizeError({
         agentExitCode: exitCode,
+        recentErrors: recentStderr,
         attemptCount: ticket.attempt_count
       });
 
