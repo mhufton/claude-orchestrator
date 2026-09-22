@@ -10,6 +10,38 @@ export interface ReviewScore {
   feedback?: string;
 }
 
+/** Feedback goes into agent prompts; keep it bounded. */
+const MAX_FEEDBACK_CHARS = 4000;
+
+/** Drop the score bookkeeping the bot appends inside its own sections. */
+function stripScoreLines(raw: string): string {
+  const cleaned = raw
+    .split('\n')
+    .filter(line => !/^\s*\*?\*?(QUALITY_SCORE|Starting score|Total score)\b/i.test(line))
+    .join('\n')
+    .trim();
+
+  return cleaned.length > MAX_FEEDBACK_CHARS
+    ? `${cleaned.slice(0, MAX_FEEDBACK_CHARS)}\n...[truncated]`
+    : cleaned;
+}
+
+/**
+ * Pull a markdown section out by heading, up to the next heading of the same or
+ * higher level. Sub-headings inside the section are kept — the bot groups its
+ * findings under `#### Blocking` / `#### Nits`.
+ */
+function extractSection(body: string, heading: string): string | undefined {
+  const start = body.match(new RegExp(`(?:^|\\n)(#{2,4})[ \\t]*${heading}\\b[^\\n]*\\n`, 'i'));
+  if (!start || start.index === undefined) return undefined;
+
+  const rest = body.slice(start.index + start[0].length);
+  const end = rest.search(new RegExp(`\\n#{1,${start[1].length}}[ \\t]`));
+  const section = stripScoreLines(end === -1 ? rest : rest.slice(0, end));
+
+  return section || undefined;
+}
+
 /**
  * Parse review score from PR comments
  * Looks for patterns like "Score: 85/100" or "Total Score: 85"
@@ -29,7 +61,14 @@ export async function parseReviewScore(prNumber: number): Promise<ReviewScore | 
     return null;
   }
 
-  const comment = scoreComments[0];
+  // The review bot edits ONE comment in place: it posts an unchecked task list with
+  // a placeholder score first, then rewrites it with the real verdict. Reading the
+  // placeholder yields 0 and looks like a catastrophic review. Treat an unchecked
+  // box as "still running" and report no score yet, not a failing one.
+  const comment = scoreComments.find(c => !c.body.includes('- [ ]'));
+  if (!comment) {
+    return null;
+  }
   const body = comment.body;
 
   // Try to extract total score - multiple formats supported
@@ -58,9 +97,18 @@ export async function parseReviewScore(prNumber: number): Promise<ReviewScore | 
   // Extract feedback if present (usually in a section after score)
   let feedback: string | undefined;
 
+  // The live review bot emits its prose under a `### Findings` heading. These findings
+  // never become review threads, so if we do not read them here nothing in the system
+  // ever sees them. Checked first; `Deductions:`/`Issues:` are older formats kept as
+  // fallbacks.
+  const findings = extractSection(body, 'Findings');
+  if (findings) {
+    feedback = findings;
+  }
+
   // Try to extract deductions (from Claude code review format)
   // Handle both orders: Deductions before/after QUALITY_SCORE
-  const deductionsMatch = body.match(/Deductions:([\s\S]*?)(?=\n\n|\n##|$)/i);
+  const deductionsMatch = feedback ? null : body.match(/Deductions:([\s\S]*?)(?=\n\n|\n##|$)/i);
   if (deductionsMatch) {
     // Clean up the deductions - remove any trailing QUALITY_SCORE line
     let deductions = deductionsMatch[1].trim();
