@@ -332,6 +332,14 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     if (score) {
       db.updateTicket(ticket.id, { current_score: score.total });
       broadcastTicketUpdated(ticket.id, { current_score: score.total });
+
+      // Attribute the score to the attempt that actually produced this SHA, not
+      // just to the ticket. Pushes don't map to attempts 1:1 (branch-updater
+      // merges, and attempts that push nothing) — this join is the reliable one.
+      const dispatch = db.getDispatchByTicketAndSha(ticket.id, pr.head.sha);
+      if (dispatch) {
+        db.recordDispatchScore(dispatch.id, score.total, score.commentId);
+      }
     }
 
     console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, score=${score?.total ?? 'none'}, blockers=${issues.length}, unresolved=${threadOutcome.stillOpen.length}, attempt=${ticket.attempt_count}`);
@@ -690,6 +698,16 @@ async function watchBatchPR(batch: Batch): Promise<WatchResult> {
 
     if (report.score) {
       db.updateBatch(batch.id, { current_score: report.score.total });
+
+      // Same SHA-based attribution as the single-ticket path, keyed off the
+      // representative ticket the batch's dispatch row was recorded under.
+      const representativeTicket = db.getTicketsInBatch(batch.id).sort((a, b) => a.id - b.id)[0];
+      if (representativeTicket) {
+        const dispatch = db.getDispatchByTicketAndSha(representativeTicket.id, pr.head.sha);
+        if (dispatch) {
+          db.recordDispatchScore(dispatch.id, report.score.total, report.score.commentId);
+        }
+      }
     }
 
     console.log(`[pr-watcher] Batch ${batch.id} PR #${batch.pr_number}: CI=${report.hasCIFailures ? 'FAILED' : 'passed'}, score=${report.score?.total ?? 'none'}, blockers=${report.issues.length}, attempt=${batch.attempt_count}`);

@@ -15,6 +15,17 @@ import type { Ticket } from '../state/types';
 // Path to orchestrator bin directory (for queue-run and other tools)
 const ORCHESTRATOR_BIN = join(dirname(dirname(import.meta.dir)), 'bin');
 
+/** Local HEAD of the worktree's branch, or null if it can't be read (e.g. mid-recovery). */
+async function getHeadSha(worktreePath: string): Promise<string | null> {
+  try {
+    const { $ } = await import('bun');
+    const result = await $`git rev-parse HEAD`.cwd(worktreePath).quiet();
+    return result.text().trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // Track current todos for each ticket
 const ticketTodos = new Map<number, AgentTodo[]>();
 
@@ -112,6 +123,15 @@ function pipeStderrToLogs(ticketId: number, proc: Subprocess): void {
       console.error(`[agent-stderr ${ticketId}] reader error:`, error);
     }
   })();
+}
+
+/** Shape of the CLI's terminal `result` stream-json event, fields relevant to dispatch accounting. */
+interface StreamResultEvent {
+  total_cost_usd?: number;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  num_turns?: number;
+  duration_ms?: number;
+  modelUsage?: Record<string, unknown>;
 }
 
 export interface AgentResult {
@@ -640,12 +660,29 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     ticketContexts.delete(ticket.id);
   }
 
-  const prompt = buildAgentPrompt(ticket, context);
-
   // Select model based on labels and attempt count
   const model = selectModel(ticket);
+  const headShaBefore = await getHeadSha(worktreePath);
+
+  // Dispatch recording: one row per spawn event. PR 1 records and decides
+  // nothing — rule is always 'STATIC' and mode is always 'off' until the
+  // router (PR 2) exists.
+  const dispatch = db.insertDispatch({
+    ticket_id: ticket.id,
+    attempt_number: ticket.attempt_count,
+    phase: 'implement',
+    model,
+    rule: 'STATIC',
+    fallback: false,
+    mode: 'off',
+    features: '{}',
+    head_sha_before: headShaBefore,
+  });
+
   // Record which model ran this attempt; joinable to tickets.current_score via ticket_id.
   db.insertLog(ticket.id, 'model_selected', model, model, ticket.attempt_count);
+
+  const prompt = buildAgentPrompt(ticket, context);
 
   console.log(`Spawning agent for ticket #${ticket.github_issue_number} in slot ${slot}`);
   console.log(`Worktree: ${worktreePath}`);
@@ -696,6 +733,10 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
   const stdoutReader = proc.stdout.getReader();
   const decoder = new TextDecoder();
 
+  // The CLI's final `result` event carries cost/token/turn accounting for the whole
+  // run; captured here so the dispatch row can be completed without re-scanning logs.
+  let resultEvent: StreamResultEvent | null = null;
+
   try {
     while (true) {
       const { done, value } = await stdoutReader.read();
@@ -712,6 +753,10 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
           if (event.type === 'system' && event.sessionId) {
             agentSessionIds.set(ticket.id, event.sessionId);
             console.log(`[agent] Session ID for ticket ${ticket.id}: ${event.sessionId}`);
+          }
+
+          if (event.type === 'result') {
+            resultEvent = event;
           }
 
           // Log to database
@@ -758,6 +803,22 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
   // Wait for process to complete
   const exitCode = await proc.exited;
   runningAgents.delete(ticket.id);
+
+  // Complete the dispatch row. head_sha_after is left null when the worktree HEAD
+  // didn't move — that's the crash/stale class the row exists to label (31% of
+  // attempts push nothing today, and that fact is otherwise invisible).
+  const headShaAfter = await getHeadSha(worktreePath);
+  const actualModel = resultEvent?.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
+  db.completeDispatch(dispatch.id, {
+    exit_code: exitCode,
+    head_sha_after: headShaAfter && headShaAfter !== headShaBefore ? headShaAfter : null,
+    cost_usd: resultEvent?.total_cost_usd ?? null,
+    input_tokens: resultEvent?.usage?.input_tokens ?? null,
+    output_tokens: resultEvent?.usage?.output_tokens ?? null,
+    num_turns: resultEvent?.num_turns ?? null,
+    duration_ms: resultEvent?.duration_ms ?? null,
+    model: actualModel ?? null,
+  });
 
   // Mark progress as complete if successful
   if (exitCode === 0) {

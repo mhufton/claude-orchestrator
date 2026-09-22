@@ -168,3 +168,44 @@ export interface ChatMessage {
   pending: number;  // 0 or 1 in SQLite
   created_at: string;
 }
+
+// Dispatch recording (one row per spawn event, not per attempt_count — see
+// server/db/index.ts insertDispatch for why attempt_number is not the key).
+export type DispatchPhase = 'refine' | 'implement' | 'respond';
+export type DispatchOutcome = 'merged' | 'scored' | 'no_push' | 'crashed' | 'abandoned';
+export type RouterMode = 'off' | 'shadow' | 'enforce';
+
+export interface Dispatch {
+  id: number;
+  ticket_id: number;
+  batch_id: number | null;
+  attempt_number: number;
+  phase: DispatchPhase;
+  // The rule's chosen 'opus' | 'sonnet' at spawn time; completeDispatch may
+  // overwrite it with the CLI's raw modelUsage key (e.g. 'claude-sonnet-4-5'),
+  // which is why this is a string rather than the narrower union.
+  model: string;
+  rule: string;
+  confidence: number | null;
+  reason: string | null;
+  fallback: number;  // 0 or 1 in SQLite
+  mode: RouterMode;
+  features: string;  // JSON string, exactly as seen, nulls preserved
+  router_version: string | null;
+  risk_list_sha: string | null;
+  dispatched_at: string;
+  head_sha_before: string | null;
+  finished_at: string | null;
+  exit_code: number | null;
+  head_sha_after: string | null;  // NULL => the attempt pushed nothing
+  pr_number: number | null;
+  score: number | null;
+  score_comment_id: number | null;
+  scored_at: string | null;
+  cost_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  num_turns: number | null;
+  duration_ms: number | null;
+  outcome: DispatchOutcome | null;
+}

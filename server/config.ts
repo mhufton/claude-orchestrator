@@ -1,3 +1,5 @@
+import { dirname, join } from 'path';
+
 // PRs target main; the dev branch was retired with the single-branch pipeline.
 export const BASE_BRANCH = process.env.BASE_BRANCH || 'main';
 
@@ -67,6 +69,13 @@ export const MAX_AUTO_ATTEMPTS = parseInt(process.env.MAX_AUTO_ATTEMPTS || '3', 
 // ticket with more capability rather than the same model that already failed it.
 // Shorter than MAX_AUTO_ATTEMPTS on purpose — spawner clamps to the last rung.
 export const MODEL_ESCALATION_LADDER: readonly ('opus' | 'sonnet')[] = ['sonnet', 'opus'];
+
+// bun:sqlite resolves a relative path against process.cwd(), so launching the server
+// from any other directory than the repo root silently opens/creates a different,
+// empty database (see the zero-byte server/orchestrator.db fossil this replaces).
+// import.meta.dir is server/, so the repo root is one level up.
+export const DB_PATH: string =
+  process.env.ORCHESTRATOR_DB || join(dirname(import.meta.dir), 'orchestrator.db');
 
 // Absolute path required: Bun.spawn throws ENOENT rather than falling back to PATH,
 // and a dangling path fails silently (see the /opt/homebrew hardcode this replaces).
