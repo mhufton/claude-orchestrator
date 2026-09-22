@@ -136,6 +136,7 @@ Now that you understand the context from holistic analysis, implement the soluti
   deployment stages, not git branches. There is no \`dev\` branch.
 - **Scope Guard** - If a change isn't required for this issue, create a follow-up issue:
   \`gh issue create --title "Follow-up: <description>" --body "..." --label "claude-review"\`
+- **Do The Work Yourself** - Do not dispatch sub-agents or use the Task tool. You share this worktree with nothing else running concurrently in it.
 
 ## WORKFLOW
 
@@ -375,6 +376,7 @@ ${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}## After Inves
 - PRs target main (there is no dev branch)
 - No "by Claude" in commits/PRs
 - If the issue requires unrelated changes, create a follow-up issue instead: \`gh issue create --title "Follow-up: ..." --label "claude-review"\`
+- Do the work yourself - do not dispatch sub-agents or use the Task tool
 `;
 }
 

@@ -9,7 +9,7 @@ import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
 import { tryAcquireRespawnLock } from './respawn-coordinator';
 import { ProgressTracker } from './progress-tracker';
-import { MAX_AUTO_ATTEMPTS, CLAUDE_BIN, MODEL_ESCALATION_LADDER, ROUTER_MODE } from '../config';
+import { MAX_AUTO_ATTEMPTS, CLAUDE_BIN, MODEL_ESCALATION_LADDER, MAX_IMPLEMENTATION_TURNS, ROUTER_MODE } from '../config';
 import { decide, currentRiskListSha } from './router';
 import { runRefinePhase } from './refiner';
 import type { Ticket } from '../state/types';
@@ -236,6 +236,8 @@ async function continueAgentConversation(
     '--model', model,
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',
+    '--max-turns', String(MAX_IMPLEMENTATION_TURNS),
+    '--disallowedTools', 'Task',  // block recursive sub-agent fan-out (shared worktree)
     '--resume', sessionId,
     '-p', userMessage
   ], {
@@ -714,6 +716,8 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     '--model', model,
     '--output-format', 'stream-json',
     '--dangerously-skip-permissions',  // Allow autonomous file operations
+    '--max-turns', String(MAX_IMPLEMENTATION_TURNS),
+    '--disallowedTools', 'Task',  // block recursive sub-agent fan-out (shared worktree)
     '-p', prompt
   ], {
     cwd: worktreePath,

@@ -71,6 +71,11 @@ export const MAX_AUTO_ATTEMPTS = parseInt(process.env.MAX_AUTO_ATTEMPTS || '3', 
 // Shorter than MAX_AUTO_ATTEMPTS on purpose — spawner clamps to the last rung.
 export const MODEL_ESCALATION_LADDER: readonly ('opus' | 'sonnet')[] = ['sonnet', 'opus'];
 
+// Hard turn cap for implementation agent spawns (spawner.ts), unbounded before this.
+// 331 historical `result` rows top out at 198 turns (p95 120, p99 184) — 250 clears
+// the observed tail with headroom without leaving a runaway fan-out unbounded.
+export const MAX_IMPLEMENTATION_TURNS = parseInt(process.env.MAX_IMPLEMENTATION_TURNS || '250', 10);
+
 // bun:sqlite resolves a relative path against process.cwd(), so launching the server
 // from any other directory than the repo root silently opens/creates a different,
 // empty database (see the zero-byte server/orchestrator.db fossil this replaces).
