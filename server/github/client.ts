@@ -198,20 +198,48 @@ export interface PRFile {
 }
 
 export async function getPRFiles(prNumber: number): Promise<PRFile[]> {
-  const response = await octokit.pulls.listFiles({
+  // Paginated: a truncated file list makes "the diff does not touch this path" a lie,
+  // and thread-resolver.ts resolves review threads off the back of that answer.
+  const files = await octokit.paginate(octokit.pulls.listFiles, {
     owner,
     repo,
     pull_number: prNumber,
     per_page: 100
   });
 
-  return response.data.map(f => ({
+  return files.map(f => ({
     filename: f.filename,
     status: f.status,
     additions: f.additions,
     deletions: f.deletions,
     changes: f.changes
   }));
+}
+
+export interface PRCommit {
+  sha: string;
+  /** Author date: survives a rebase, so a rebase alone cannot fake post-review work. */
+  date: string | null;
+}
+
+export async function getPRCommits(prNumber: number): Promise<PRCommit[]> {
+  const commits = await octokit.paginate(octokit.pulls.listCommits, {
+    owner,
+    repo,
+    pull_number: prNumber,
+    per_page: 100
+  });
+
+  return commits.map(c => ({
+    sha: c.sha,
+    date: c.commit.author?.date ?? c.commit.committer?.date ?? null,
+  }));
+}
+
+/** Files touched by one commit. GitHub caps this response at 300 files. */
+export async function getCommitFiles(sha: string): Promise<string[]> {
+  const res = await octokit.repos.getCommit({ owner, repo, ref: sha });
+  return (res.data.files ?? []).map(f => f.filename);
 }
 
 export async function getPRsForBranch(branchName: string): Promise<GitHubPR[]> {
@@ -440,14 +468,35 @@ export interface PRReviewComment {
 }
 
 export async function getPRReviewComments(prNumber: number): Promise<PRReviewComment[]> {
-  const response = await octokit.pulls.listReviewComments({
+  const comments = await octokit.paginate(octokit.pulls.listReviewComments, {
     owner,
     repo,
     pull_number: prNumber,
     per_page: 100
   });
 
-  return response.data as unknown as PRReviewComment[];
+  return comments as unknown as PRReviewComment[];
+}
+
+/**
+ * Login of the account this orchestrator pushes and replies as.
+ *
+ * Needed to tell "the agent answered this thread" from "the review bot is still
+ * talking to itself" — thread-resolver.ts will not resolve a thread whose last
+ * word is not ours. Cached: it cannot change inside a process lifetime.
+ */
+let cachedSelfLogin: string | null | undefined;
+
+export async function getAuthenticatedLogin(): Promise<string | null> {
+  if (cachedSelfLogin !== undefined) return cachedSelfLogin;
+  try {
+    const res = await octokit.users.getAuthenticated();
+    cachedSelfLogin = res.data.login;
+  } catch (error) {
+    console.warn('Could not resolve authenticated GitHub login:', error instanceof Error ? error.message : error);
+    cachedSelfLogin = null;
+  }
+  return cachedSelfLogin;
 }
 
 // Get all feedback for a PR (comments + review comments + check failures)
@@ -591,6 +640,95 @@ export async function getUnrepliedBotComments(prNumber: number): Promise<PRRevie
   // Return bot comments that haven't been replied to AND are still active
   // Comments with line === null are outdated (code changed in subsequent commits)
   return botComments.filter(c => !repliedToIds.has(c.id) && c.line !== null);
+}
+
+export interface ThreadComment {
+  /** REST comment id, when GitHub exposes one. */
+  id: number | null;
+  author: string;
+  createdAt: string;
+  body: string;
+}
+
+export interface UnresolvedThread {
+  id: string;
+  path: string | null;
+  line: number | null;
+  isOutdated: boolean;
+  firstComment: string;
+  lastAuthor: string;
+  replyCount: number;
+  /** REST comment ids in this thread — the only join between GraphQL threads and pulls.listReviewComments. */
+  commentIds: number[];
+  /** Full comment list in order: thread-resolver.ts dates the evidence off the last reviewer comment. */
+  comments: ThreadComment[];
+}
+
+/**
+ * Review threads that branch protection will refuse to merge past.
+ *
+ * NOT the same question as getUnrepliedBotComments: `required_conversation_resolution`
+ * checks RESOLUTION, and a thread stays unresolved after a reply and after the code
+ * under it changes. Threads live only in GraphQL — the REST comments endpoint cannot
+ * see or set `isResolved`.
+ */
+export async function getUnresolvedReviewThreads(prNumber: number): Promise<UnresolvedThread[]> {
+  const query = `query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){
+        reviewThreads(first:100){
+          nodes{
+            id isResolved isOutdated path line
+            comments(first:100){ nodes{ databaseId createdAt body author{ login } } }
+          }
+        }
+      }
+    }
+  }`;
+
+  const res = await octokit.graphql<{
+    repository: { pullRequest: { reviewThreads: { nodes: Array<{
+      id: string; isResolved: boolean; isOutdated: boolean;
+      path: string | null; line: number | null;
+      comments: { nodes: Array<{ databaseId: number | null; createdAt: string; body: string; author: { login: string } | null }> };
+    }> } } };
+  }>(query, { owner, repo, number: prNumber });
+
+  return res.repository.pullRequest.reviewThreads.nodes
+    .filter(t => !t.isResolved)
+    .map(t => {
+      const cs = t.comments.nodes;
+      return {
+        id: t.id,
+        path: t.path,
+        line: t.line,
+        isOutdated: t.isOutdated,
+        firstComment: cs[0]?.body ?? '',
+        lastAuthor: cs[cs.length - 1]?.author?.login ?? 'unknown',
+        replyCount: Math.max(0, cs.length - 1),
+        commentIds: cs.map(c => c.databaseId).filter((id): id is number => typeof id === 'number'),
+        comments: cs.map(c => ({
+          id: c.databaseId,
+          author: c.author?.login ?? 'unknown',
+          createdAt: c.createdAt,
+          body: c.body,
+        })),
+      };
+    });
+}
+
+/** Mark one review thread resolved. Only ever call this on a thread genuinely addressed. */
+export async function resolveReviewThread(threadId: string): Promise<boolean> {
+  try {
+    await octokit.graphql(
+      `mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ isResolved } } }`,
+      { id: threadId },
+    );
+    return true;
+  } catch (error) {
+    console.error(`Failed to resolve thread ${threadId}:`, error instanceof Error ? error.message : error);
+    return false;
+  }
 }
 
 // Combined status check - tries Check Runs API first, falls back to Commit Status API

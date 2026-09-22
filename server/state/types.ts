@@ -105,6 +105,31 @@ export interface WorktreeSlot {
   ticketId: number | null;
 }
 
+/**
+ * Why a review thread is or is not resolvable.
+ * - `resolved`        — replied to, and a commit after the review touched its file.
+ * - `unbacked_claim`  — replied to, but no post-review commit touches its file.
+ * - `no_reply`        — nobody answered it.
+ * - `unverifiable`    — the evidence could not be read (no path, or the commit API failed).
+ * - `resolve_failed`  — backed, but the resolve mutation errored.
+ */
+export type ThreadDecision = 'resolved' | 'resolve_failed' | 'unbacked_claim' | 'no_reply' | 'unverifiable';
+
+export interface UnresolvedThreadContext {
+  threadId: string;
+  path: string | null;
+  line: number | null;
+  isOutdated: boolean;
+  firstComment: string;
+  /** The agent already answered this thread. */
+  agentReplied: boolean;
+  /** A commit dated at or after the last reviewer comment touches the thread's file. */
+  codeChangedAfterReview: boolean;
+  decision: ThreadDecision;
+  /** One-line human reason behind `decision`. */
+  reason: string;
+}
+
 export interface ReviewContext {
   previousScore?: number | null;
   reviewFeedback?: string;
@@ -118,6 +143,11 @@ export interface ReviewContext {
   agentIntent?: string;
   userMessages?: string[];
   hasMergeConflicts?: boolean;
+  /** Repo identity, so retry prompts can print real `gh api` commands instead of OWNER/REPO/PR. */
+  repoOwner?: string;
+  repoName?: string;
+  /** Threads `required_conversation_resolution` is still blocking the merge on. */
+  unresolvedThreads?: UnresolvedThreadContext[];
   failureAnalysis?: {
     category: string;
     description: string;
