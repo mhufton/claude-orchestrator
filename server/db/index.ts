@@ -374,6 +374,18 @@ function runMigrations(): void {
     console.log('Migrating database: adding last_checked_sha column for respawn tracking');
     db.exec('ALTER TABLE tickets ADD COLUMN last_checked_sha TEXT');
   }
+
+  // Migration: Add model + attempt_number to agent_logs, so the model a run used
+  // is queryable against tickets.attempt_count / current_score via ticket_id.
+  const agentLogsTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_logs'").all();
+  if (agentLogsTable.length > 0) {
+    const agentLogsColumns = db.query("PRAGMA table_info(agent_logs)").all() as Array<{ name: string }>;
+    if (!agentLogsColumns.some(c => c.name === 'model')) {
+      console.log('Migrating database: adding model + attempt_number columns to agent_logs');
+      db.exec('ALTER TABLE agent_logs ADD COLUMN model TEXT');
+      db.exec('ALTER TABLE agent_logs ADD COLUMN attempt_number INTEGER');
+    }
+  }
 }
 
 export function getDatabase(): Database {
@@ -467,11 +479,11 @@ export function deleteTicket(id: number): boolean {
 }
 
 // Agent log operations
-export function insertLog(ticketId: number, type: string, content: string): void {
+export function insertLog(ticketId: number, type: string, content: string, model?: string, attemptNumber?: number): void {
   db.query(`
-    INSERT INTO agent_logs (ticket_id, type, content)
-    VALUES (?, ?, ?)
-  `).run(ticketId, type, content);
+    INSERT INTO agent_logs (ticket_id, type, content, model, attempt_number)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(ticketId, type, content, model ?? null, attemptNumber ?? null);
 }
 
 export function getLogsForTicket(ticketId: number, limit: number = 100): AgentLog[] {

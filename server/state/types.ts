@@ -97,6 +97,8 @@ export interface AgentLog {
   timestamp: string;
   type: string;
   content: string;
+  model: string | null;
+  attempt_number: number | null;
 }
 
 export interface WorktreeSlot {

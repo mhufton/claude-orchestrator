@@ -159,9 +159,10 @@ export function calculateBackoffDelay(
  * - use-opus label: always use opus
  * - use-sonnet label: always use sonnet
  * - should_escalate_model flag from error categorization: use opus
- * - No label/flag: sonnet for attempts 1-3, opus for 4+ (escalate to avoid loops)
+ * - No label/flag: MODEL_ESCALATION_LADDER[attempt_count - 1] (config.ts), clamped
+ *   to the last rung once attempts exceed the ladder length
  */
-function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
+export function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
   // Parse labels from JSON string
   let labels: string[] = [];
   try {
@@ -186,15 +187,11 @@ function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
     return 'opus';
   }
 
-  // Default: sonnet for attempts 1-3, opus for 4+ to balance cost vs capability
-  // With server restart protection, fewer false escalations - give Sonnet more chances
-  if (ticket.attempt_count >= 4) {
-    console.log(`[model] Using opus for #${ticket.github_issue_number} (attempt ${ticket.attempt_count} >= 4, escalating after sonnet retries)`);
-    return 'opus';
-  }
-
-  console.log(`[model] Using sonnet for #${ticket.github_issue_number} (attempt ${ticket.attempt_count})`);
-  return 'sonnet';
+  // Default: escalate by attempt number per MODEL_ESCALATION_LADDER (config.ts)
+  const rungIndex = Math.max(0, Math.min(ticket.attempt_count - 1, MODEL_ESCALATION_LADDER.length - 1));
+  const rung = MODEL_ESCALATION_LADDER[rungIndex];
+  console.log(`[model] Using ${rung} for #${ticket.github_issue_number} (attempt ${ticket.attempt_count})`);
+  return rung;
 }
 
 /**
@@ -230,10 +227,10 @@ async function continueAgentConversation(
       WORKTREE_SLOT: String(ticket.worktree_slot),
       ORCHESTRATOR_URL: `http://localhost:${process.env.PORT || 3456}`
     }
-  pipeStderrToLogs(ticket.id, proc);
   });
 
   runningAgents.set(ticket.id, proc);
+  pipeStderrToLogs(ticket.id, proc);
 
   // Get or create progress tracker for this ticket
   let progressTracker = progressTrackers.get(ticket.id);
@@ -647,6 +644,8 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
   // Select model based on labels and attempt count
   const model = selectModel(ticket);
+  // Record which model ran this attempt; joinable to tickets.current_score via ticket_id.
+  db.insertLog(ticket.id, 'model_selected', model, model, ticket.attempt_count);
 
   console.log(`Spawning agent for ticket #${ticket.github_issue_number} in slot ${slot}`);
   console.log(`Worktree: ${worktreePath}`);
@@ -673,8 +672,8 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     }
   });
 
-  pipeStderrToLogs(ticket.id, proc);
   runningAgents.set(ticket.id, proc);
+  pipeStderrToLogs(ticket.id, proc);
 
   // Initialize progress tracker for this ticket
   const progressTracker = new ProgressTracker();
