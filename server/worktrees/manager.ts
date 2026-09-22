@@ -1,6 +1,7 @@
 import { $ } from 'bun';
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
+import { BASE_BRANCH } from '../config';
 
 let repoPath: string;
 let worktreeDir: string;
@@ -29,14 +30,14 @@ export async function createWorktree(slot: number, branchName: string): Promise<
   }
 
   // Fetch latest from origin (dev is our working branch, PRs target dev)
-  await $`git -C ${repoPath} fetch origin dev`.quiet();
+  await $`git -C ${repoPath} fetch origin ${BASE_BRANCH}`.quiet();
 
   // Create branch from latest dev
   try {
-    await $`git -C ${repoPath} branch ${branchName} origin/dev`.quiet();
+    await $`git -C ${repoPath} branch ${branchName} origin/${BASE_BRANCH}`.quiet();
   } catch {
     // Branch might already exist, try to reset it to latest dev
-    await $`git -C ${repoPath} branch -f ${branchName} origin/dev`.quiet();
+    await $`git -C ${repoPath} branch -f ${branchName} origin/${BASE_BRANCH}`.quiet();
   }
 
   // Create worktree
@@ -55,11 +56,11 @@ export async function resetWorktree(slot: number, branchName: string): Promise<v
 
   if (!existsSync(worktreePath)) {
     // Worktree doesn't exist, create it fresh
-    await $`git -C ${repoPath} fetch origin dev`.quiet();
+    await $`git -C ${repoPath} fetch origin ${BASE_BRANCH}`.quiet();
     try {
-      await $`git -C ${repoPath} branch ${branchName} origin/dev`.quiet();
+      await $`git -C ${repoPath} branch ${branchName} origin/${BASE_BRANCH}`.quiet();
     } catch {
-      await $`git -C ${repoPath} branch -f ${branchName} origin/dev`.quiet();
+      await $`git -C ${repoPath} branch -f ${branchName} origin/${BASE_BRANCH}`.quiet();
     }
     await $`git -C ${repoPath} worktree add ${worktreePath} ${branchName}`.quiet();
     console.log(`Created worktree at ${worktreePath} on branch ${branchName}`);
@@ -67,12 +68,20 @@ export async function resetWorktree(slot: number, branchName: string): Promise<v
   }
 
   // Fetch latest dev
-  await $`git -C ${worktreePath} fetch origin dev`.quiet();
+  await $`git -C ${worktreePath} fetch origin ${BASE_BRANCH}`.quiet();
+
+  // A slot being handed to a new ticket must come up clean no matter how the
+  // previous occupant left it — releaseSlot may never have run (crash, kill,
+  // server restart), in which case a leftover rebase/merge or untracked files
+  // would make the checkout below fail and strand the slot.
+  for (const op of ['rebase', 'merge', 'cherry-pick']) {
+    try { await $`git -C ${worktreePath} ${op} --abort`.quiet(); } catch { /* none in progress */ }
+  }
+  await $`git -C ${worktreePath} reset --hard`.quiet();
+  await $`git -C ${worktreePath} clean -fd -e node_modules -e .claude-handoff.md`.quiet();
 
   // Create/reset branch to latest dev and switch to it
-  // Worktree should already be clean from releaseSlot, but reset --hard as safety
-  await $`git -C ${worktreePath} reset --hard`.quiet();
-  await $`git -C ${worktreePath} checkout -B ${branchName} origin/dev`.quiet();
+  await $`git -C ${worktreePath} checkout -B ${branchName} origin/${BASE_BRANCH}`.quiet();
 
   console.log(`Started branch ${branchName} in worktree at ${worktreePath}`);
 }
@@ -90,7 +99,7 @@ export async function cleanupWorktree(slot: number): Promise<void> {
   }
 
   // Fetch latest dev
-  await $`git -C ${worktreePath} fetch origin dev`.quiet();
+  await $`git -C ${worktreePath} fetch origin ${BASE_BRANCH}`.quiet();
 
   // Abort any in-progress operations
   try {
@@ -110,7 +119,7 @@ export async function cleanupWorktree(slot: number): Promise<void> {
   await $`git -C ${worktreePath} clean -fd -e node_modules -e .claude-handoff.md`.quiet();
 
   // Checkout dev so worktree is on a clean base branch
-  await $`git -C ${worktreePath} checkout origin/dev`.quiet();
+  await $`git -C ${worktreePath} checkout origin/${BASE_BRANCH}`.quiet();
 
   console.log(`Cleaned up worktree at ${worktreePath} (on dev, node_modules preserved)`);
 }

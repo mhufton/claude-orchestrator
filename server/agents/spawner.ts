@@ -2,13 +2,14 @@ import { spawn, type Subprocess } from 'bun';
 import { join, dirname } from 'path';
 import * as db from '../db';
 import { getWorktreePath } from '../worktrees/manager';
-import { buildAgentPrompt } from './prompts';
+import { buildAgentPrompt } from './prompts.holistic';
 import { broadcastAgentOutput, broadcastTicketUpdated, broadcastAgentTodos, broadcastChatMessagesDelivered, broadcastAgentContext, broadcastSlotStatus, broadcastProgressUpdate, type AgentTodo } from '../ws/handler';
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForIssue, getIssue, getPR } from '../github/client';
 import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
 import { tryAcquireRespawnLock } from './respawn-coordinator';
 import { ProgressTracker } from './progress-tracker';
+import { MAX_AUTO_ATTEMPTS, CLAUDE_BIN, MODEL_ESCALATION_LADDER } from '../config';
 import type { Ticket } from '../state/types';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
@@ -76,6 +77,43 @@ const agentSessionIds = new Map<number, string>();
 // This is a synchronous check - if spawn is in progress, skip
 const spawningAgents = new Set<number>();
 
+/**
+ * Drain the agent's stderr into agent_logs. Unread, the pipe also fills and
+ * stalls the child, so this is a drain as much as a log. Fire-and-forget.
+ */
+function pipeStderrToLogs(ticketId: number, proc: Subprocess): void {
+  const stream = proc.stderr;
+  if (!stream || typeof stream === 'number') return;
+
+  void (async () => {
+    const reader = (stream as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          console.error(`[agent-stderr ${ticketId}] ${line}`);
+          db.insertLog(ticketId, 'stderr', line);
+          broadcastAgentOutput(ticketId, { type: 'stderr', content: line });
+        }
+      }
+      if (buffer.trim()) {
+        console.error(`[agent-stderr ${ticketId}] ${buffer}`);
+        db.insertLog(ticketId, 'stderr', buffer);
+        broadcastAgentOutput(ticketId, { type: 'stderr', content: buffer });
+      }
+    } catch (error) {
+      console.error(`[agent-stderr ${ticketId}] reader error:`, error);
+    }
+  })();
+}
+
 export interface AgentResult {
   success: boolean;
   exitCode: number | null;
@@ -121,9 +159,10 @@ export function calculateBackoffDelay(
  * - use-opus label: always use opus
  * - use-sonnet label: always use sonnet
  * - should_escalate_model flag from error categorization: use opus
- * - No label/flag: sonnet for attempts 1-3, opus for 4+ (escalate to avoid loops)
+ * - No label/flag: MODEL_ESCALATION_LADDER[attempt_count - 1] (config.ts), clamped
+ *   to the last rung once attempts exceed the ladder length
  */
-function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
+export function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
   // Parse labels from JSON string
   let labels: string[] = [];
   try {
@@ -148,15 +187,11 @@ function selectModel(ticket: Ticket): 'opus' | 'sonnet' {
     return 'opus';
   }
 
-  // Default: sonnet for attempts 1-3, opus for 4+ to balance cost vs capability
-  // With server restart protection, fewer false escalations - give Sonnet more chances
-  if (ticket.attempt_count >= 4) {
-    console.log(`[model] Using opus for #${ticket.github_issue_number} (attempt ${ticket.attempt_count} >= 4, escalating after sonnet retries)`);
-    return 'opus';
-  }
-
-  console.log(`[model] Using sonnet for #${ticket.github_issue_number} (attempt ${ticket.attempt_count})`);
-  return 'sonnet';
+  // Default: escalate by attempt number per MODEL_ESCALATION_LADDER (config.ts)
+  const rungIndex = Math.max(0, Math.min(ticket.attempt_count - 1, MODEL_ESCALATION_LADDER.length - 1));
+  const rung = MODEL_ESCALATION_LADDER[rungIndex];
+  console.log(`[model] Using ${rung} for #${ticket.github_issue_number} (attempt ${ticket.attempt_count})`);
+  return rung;
 }
 
 /**
@@ -173,7 +208,7 @@ async function continueAgentConversation(
   console.log(`[agent] Continuing conversation for ticket #${ticket.github_issue_number} with user message`);
 
   const proc = spawn([
-    '/opt/homebrew/bin/claude',  // Full path required - Bun spawn doesn't use env.PATH
+    CLAUDE_BIN,
     '--print',
     '--verbose',
     '--model', model,
@@ -195,6 +230,7 @@ async function continueAgentConversation(
   });
 
   runningAgents.set(ticket.id, proc);
+  pipeStderrToLogs(ticket.id, proc);
 
   // Get or create progress tracker for this ticket
   let progressTracker = progressTrackers.get(ticket.id);
@@ -608,13 +644,15 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
   // Select model based on labels and attempt count
   const model = selectModel(ticket);
+  // Record which model ran this attempt; joinable to tickets.current_score via ticket_id.
+  db.insertLog(ticket.id, 'model_selected', model, model, ticket.attempt_count);
 
   console.log(`Spawning agent for ticket #${ticket.github_issue_number} in slot ${slot}`);
   console.log(`Worktree: ${worktreePath}`);
   console.log(`Model: ${model}`);
 
   const proc = spawn([
-    '/opt/homebrew/bin/claude',  // Full path required - Bun spawn doesn't use env.PATH
+    CLAUDE_BIN,
     '--print',
     '--verbose',
     '--model', model,
@@ -635,6 +673,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
   });
 
   runningAgents.set(ticket.id, proc);
+  pipeStderrToLogs(ticket.id, proc);
 
   // Initialize progress tracker for this ticket
   const progressTracker = new ProgressTracker();
@@ -804,8 +843,6 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     });
   } else {
     // Agent finished but no PR
-    const MAX_AUTO_ATTEMPTS = 3; // Unified with pr-watcher.ts
-
     if (exitCode !== 0 && ticket.attempt_count < MAX_AUTO_ATTEMPTS) {
       // Non-zero exit code - auto-respawn (self-healing)
       // Check if another component already triggered a respawn

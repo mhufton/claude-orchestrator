@@ -243,15 +243,21 @@ export async function archiveTicket(ticketId: number): Promise<TransitionResult>
     await releaseSlot(ticket.worktree_slot);
   }
 
-  // Move to done
+  // Move to done. Clearing needs_attention is part of completing: a warning about
+  // in-flight state that survives into `done` can never be cleared by normal flow
+  // and warns forever.
   db.updateTicket(ticketId, {
     state: 'done',
-    worktree_slot: null
+    worktree_slot: null,
+    needs_attention: 0,
+    attention_reason: null
   });
 
   broadcastTicketUpdated(ticketId, {
     state: 'done',
-    worktree_slot: null
+    worktree_slot: null,
+    needs_attention: 0,
+    attention_reason: null
   });
 
   broadcastSlotStatus();
@@ -391,6 +397,15 @@ export async function startBatch(batchId: number): Promise<BatchTransitionResult
     return { success: false, error: 'No worktree slots available' };
   }
 
+  // Re-read after the acquireSlot await: `tickets` was selected before it, and the
+  // issue sync deletes backlog tickets whose labels were removed. Acting on a
+  // deleted row silently no-ops the update and trips the state_transitions FK.
+  const liveTickets = db.getTicketsInBatch(batchId);
+  if (liveTickets.length === 0) {
+    await releaseSlot(allocation.slot);
+    return { success: false, error: 'All tickets in batch disappeared before it could start' };
+  }
+
   // Update batch state
   db.updateBatch(batchId, {
     state: 'in_progress',
@@ -400,7 +415,7 @@ export async function startBatch(batchId: number): Promise<BatchTransitionResult
   });
 
   // Update all tickets in batch to in_progress
-  for (const ticket of tickets) {
+  for (const ticket of liveTickets) {
     db.updateTicket(ticket.id, {
       state: 'in_progress',
       worktree_slot: allocation.slot,
@@ -429,14 +444,14 @@ export async function startBatch(batchId: number): Promise<BatchTransitionResult
   broadcast({
     type: 'batch_started',
     batchId,
-    ticketIds: tickets.map(t => t.id)
+    ticketIds: liveTickets.map(t => t.id)
   });
 
   broadcastSlotStatus();
 
   // Spawn batch agent (don't await - let it run in background)
   const updatedBatch = db.getBatchById(batchId)!;
-  spawnBatchAgent(updatedBatch, tickets).catch(error => {
+  spawnBatchAgent(updatedBatch, liveTickets).catch(error => {
     console.error(`Batch agent spawn failed for batch ${batchId}:`, error);
   });
 
@@ -597,20 +612,25 @@ export async function completeBatch(batchId: number): Promise<BatchTransitionRes
     await releaseSlot(batch.worktree_slot);
   }
 
-  // Move ALL tickets to done
+  // Move ALL tickets to done. See archiveTicket: a needs_attention flag must not
+  // survive into `done`.
   for (const ticket of tickets) {
     db.updateTicket(ticket.id, {
       state: 'done',
       worktree_slot: null,
       pr_number: batch.pr_number,
-      pr_url: batch.pr_url
+      pr_url: batch.pr_url,
+      needs_attention: 0,
+      attention_reason: null
     });
 
     broadcastTicketUpdated(ticket.id, {
       state: 'done',
       worktree_slot: null,
       pr_number: batch.pr_number,
-      pr_url: batch.pr_url
+      pr_url: batch.pr_url,
+      needs_attention: 0,
+      attention_reason: null
     });
 
     // Log state transition

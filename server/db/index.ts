@@ -374,6 +374,18 @@ function runMigrations(): void {
     console.log('Migrating database: adding last_checked_sha column for respawn tracking');
     db.exec('ALTER TABLE tickets ADD COLUMN last_checked_sha TEXT');
   }
+
+  // Migration: Add model + attempt_number to agent_logs, so the model a run used
+  // is queryable against tickets.attempt_count / current_score via ticket_id.
+  const agentLogsTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='agent_logs'").all();
+  if (agentLogsTable.length > 0) {
+    const agentLogsColumns = db.query("PRAGMA table_info(agent_logs)").all() as Array<{ name: string }>;
+    if (!agentLogsColumns.some(c => c.name === 'model')) {
+      console.log('Migrating database: adding model + attempt_number columns to agent_logs');
+      db.exec('ALTER TABLE agent_logs ADD COLUMN model TEXT');
+      db.exec('ALTER TABLE agent_logs ADD COLUMN attempt_number INTEGER');
+    }
+  }
 }
 
 export function getDatabase(): Database {
@@ -467,11 +479,11 @@ export function deleteTicket(id: number): boolean {
 }
 
 // Agent log operations
-export function insertLog(ticketId: number, type: string, content: string): void {
+export function insertLog(ticketId: number, type: string, content: string, model?: string, attemptNumber?: number): void {
   db.query(`
-    INSERT INTO agent_logs (ticket_id, type, content)
-    VALUES (?, ?, ?)
-  `).run(ticketId, type, content);
+    INSERT INTO agent_logs (ticket_id, type, content, model, attempt_number)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(ticketId, type, content, model ?? null, attemptNumber ?? null);
 }
 
 export function getLogsForTicket(ticketId: number, limit: number = 100): AgentLog[] {
@@ -978,9 +990,20 @@ export interface StateTransition {
   timestamp: string;
 }
 
+/** Count of audit rows this process failed to persist (see logStateTransition). */
+let droppedStateTransitions = 0;
+
+export function getDroppedStateTransitionCount(): number {
+  return droppedStateTransitions;
+}
+
 /**
  * Log a state transition for audit/debugging purposes.
  * Call this whenever attempt_count, state, or other key fields change.
+ *
+ * This is telemetry: it never throws into the caller, because failing to record
+ * an operation must not abort the operation itself. Failures are counted and
+ * logged at error level rather than swallowed.
  */
 export function logStateTransition(
   ticketId: number,
@@ -991,21 +1014,104 @@ export function logStateTransition(
   source: TransitionSource,
   reason?: string
 ): void {
-  db.query(`
-    INSERT INTO state_transitions (ticket_id, github_issue_number, field, old_value, new_value, source, reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    ticketId,
-    issueNumber,
-    field,
-    oldValue?.toString() ?? null,
-    newValue?.toString() ?? null,
-    source,
-    reason ?? null
-  );
+  const description = `#${issueNumber}: ${field} ${oldValue}→${newValue} (source=${source}${reason ? `, reason=${reason}` : ''})`;
+
+  try {
+    db.query(`
+      INSERT INTO state_transitions (ticket_id, github_issue_number, field, old_value, new_value, source, reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      ticketId,
+      issueNumber,
+      field,
+      oldValue?.toString() ?? null,
+      newValue?.toString() ?? null,
+      source,
+      reason ?? null
+    );
+  } catch (error) {
+    droppedStateTransitions++;
+    console.error(
+      `[state-transition] DROPPED (total=${droppedStateTransitions}) ticket_id=${ticketId} ${description}`,
+      error
+    );
+    return;
+  }
 
   // Also log to console for immediate visibility
-  console.log(`[state-transition] #${issueNumber}: ${field} ${oldValue}→${newValue} (source=${source}${reason ? `, reason=${reason}` : ''})`);
+  console.log(`[state-transition] ${description}`);
+}
+
+export type StartClaimFailure = 'ticket_gone' | 'not_startable' | 'slot_taken';
+
+export type StartClaimResult =
+  | { ok: true; ticket: Ticket; attemptCount: number }
+  | { ok: false; reason: StartClaimFailure; detail: string };
+
+/**
+ * Re-validate a ticket and claim a worktree slot for it, atomically.
+ *
+ * Callers select candidate tickets and then cross await boundaries (displacement,
+ * spawn throttles) before starting them, while the issue sync concurrently deletes
+ * tickets whose labels were removed. Re-reading and writing inside one synchronous
+ * transaction means no other task can interleave, so a caller can never act on a
+ * ticket that has been deleted or moved since selection.
+ */
+export function claimTicketForStart(
+  ticketId: number,
+  slot: number,
+  branchName: string,
+  source: TransitionSource,
+  reason?: string
+): StartClaimResult {
+  const claim = db.transaction((): StartClaimResult => {
+    const current = getTicketById(ticketId);
+    if (!current) {
+      return { ok: false, reason: 'ticket_gone', detail: `ticket ${ticketId} no longer exists` };
+    }
+
+    if (current.state !== 'backlog') {
+      return { ok: false, reason: 'not_startable', detail: `state is "${current.state}", not "backlog"` };
+    }
+
+    if (current.paused) {
+      return { ok: false, reason: 'not_startable', detail: `paused${current.pause_reason ? ` (${current.pause_reason})` : ''}` };
+    }
+
+    const occupant = getTicketBySlot(slot);
+    if (occupant && occupant.id !== ticketId) {
+      return { ok: false, reason: 'slot_taken', detail: `slot ${slot} is held by #${occupant.github_issue_number}` };
+    }
+
+    const attemptCount = (current.attempt_count || 0) + 1;
+
+    const updated = updateTicket(ticketId, {
+      state: 'in_progress',
+      worktree_slot: slot,
+      branch_name: branchName,
+      attempt_count: attemptCount,
+      needs_attention: 0,
+      attention_reason: null
+    });
+
+    if (!updated) {
+      return { ok: false, reason: 'ticket_gone', detail: `ticket ${ticketId} vanished mid-claim` };
+    }
+
+    logStateTransition(
+      ticketId,
+      current.github_issue_number,
+      'attempt_count',
+      current.attempt_count || 0,
+      attemptCount,
+      source,
+      reason
+    );
+
+    return { ok: true, ticket: updated, attemptCount };
+  });
+
+  return claim();
 }
 
 /**

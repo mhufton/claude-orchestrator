@@ -1,5 +1,6 @@
 import * as db from '../db';
 import type { Ticket } from '../state/types';
+import { BASE_BRANCH } from '../config';
 
 /**
  * Categories of failure causes
@@ -326,7 +327,7 @@ function generateSuggestions(
 
     case 'git_error':
       suggestions.push('Use git status to understand current state');
-      suggestions.push('For merge conflicts: git fetch origin dev && git rebase origin/dev');
+      suggestions.push(`For merge conflicts: git fetch origin ${BASE_BRANCH} && git rebase origin/${BASE_BRANCH}`);
       suggestions.push('Read conflict markers carefully and resolve both sides');
       break;
 

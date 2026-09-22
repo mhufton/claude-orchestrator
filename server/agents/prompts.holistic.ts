@@ -1,3 +1,4 @@
+import { SCORE_THRESHOLD } from '../config';
 import type { Ticket, ReviewContext, Batch } from '../state/types';
 
 /**
@@ -6,8 +7,12 @@ import type { Ticket, ReviewContext, Batch } from '../state/types';
  * To use:
  * 1. Backup original: cp prompts.ts prompts.backup.ts
  * 2. Copy this file: cp prompts.holistic.ts prompts.ts
- * 3. Ensure target repo has .claude/commands/holistic.md
+ * 3. Target repo supplies the reuse/placement context via .claude/skills/
+ *    (libs-index, server-layering, mr-contract) — no separate command needed.
  */
+
+// Newest-first, so the cap drops the stale tail rather than the live head.
+const MAX_INLINE_COMMENTS = 25;
 
 export function buildAgentPrompt(ticket: Ticket, context?: ReviewContext): string {
   const repoOwner = process.env.GITHUB_OWNER || 'OWNER';
@@ -35,9 +40,16 @@ ${ticket.body || 'No description provided.'}
 
 **BEFORE writing ANY code**, run architectural analysis to understand existing patterns:
 
-\`\`\`bash
-/holistic "Issue #${ticket.github_issue_number}: ${ticket.title}"
-\`\`\`
+Load the repo's own skills — they are the maintained answer to "what already
+exists and where does this go". Do not re-derive it:
+
+- **\`libs-index\`** — the authoritative list of shared utilities. Check here
+  BEFORE writing any helper. If it is in the index, extend it.
+- **\`server-layering\`** — where types, errors and utils belong in
+  \`apps/server\`. ESLint-enforced; \`domain-file-layout.spec.ts\` enforces the
+  filename suffixes.
+- **\`mr-contract\`** — the 11-item contract this PR will be reviewed against.
+  Read it now, not after the review fails.
 
 ### Why This Matters
 
@@ -120,7 +132,8 @@ Now that you understand the context from holistic analysis, implement the soluti
 - **Follow Established Patterns** - Use the examples holistic showed you
 - **Simple is Better** - Don't over-engineer
 - **Small Commits, Small Scope** - Do one thing well
-- **PRs Target dev** - All PRs must target the \`dev\` branch, NOT \`main\`
+- **PRs Target main** - Single-branch pipeline since 2026-01-30: environments are
+  deployment stages, not git branches. There is no \`dev\` branch.
 - **Scope Guard** - If a change isn't required for this issue, create a follow-up issue:
   \`gh issue create --title "Follow-up: <description>" --body "..." --label "claude-review"\`
 
@@ -130,9 +143,9 @@ Now that you understand the context from holistic analysis, implement the soluti
 2. **Review findings** and plan approach based on existing patterns
 3. **Implement** the solution following discovered patterns
 4. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
-5. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
+5. **Rebase on main**: \`git fetch origin && git rebase origin/main\`
 6. **Write handoff notes** (see below)
-7. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
+7. **Push and create PR**: \`gh pr create --base main --title "..." --body "..."\`
 
 PR body format:
 \`\`\`
@@ -183,23 +196,31 @@ IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases 
 }
 
 /**
- * Directive retry prompt - tells agent exactly what to investigate and fix
- * No passive information dumps - clear action items only
+ * The investigation checklist a retry is built around: CI, score, conflicts, review
+ * comments, open threads, user messages.
  *
- * NOTE: Retries skip holistic analysis since it was done in first attempt
+ * Shared by the single-ticket and batch retry prompts — a batch PR is blocked by the
+ * same things a ticket PR is, and the thread reply/resolve mechanics must not drift
+ * between the two.
  */
-function buildRetryPrompt(ticket: Ticket, context: ReviewContext): string {
-  const prNumber = ticket.pr_number;
+export function buildInvestigationSteps(context: ReviewContext, prNumber: number | null): string[] {
+  const repoOwner = context.repoOwner || process.env.GITHUB_OWNER || 'OWNER';
+  const repoName = context.repoName || process.env.GITHUB_REPO || 'REPO';
 
   // Build investigation commands - what to run FIRST
   const investigationSteps: string[] = [];
+
+  // Steps are numbered as they are emitted; the old filter-based counter produced
+  // duplicate numbers ("2." three times) because most pushes start with a newline.
+  let stepNo = 1;
+  const nextStep = () => String(++stepNo);
 
   // STEP 1: Always check current state
   investigationSteps.push('1. Check PR status: `gh pr view ' + prNumber + '`');
 
   // STEP 2: CI failures - tell agent to go READ the logs
   if (context.ciFailures && context.ciFailures.length > 0) {
-    investigationSteps.push('\n2. **CI IS FAILING** - Debug it now:');
+    investigationSteps.push(`\n${nextStep()}. **CI IS FAILING** - Debug it now:`);
     context.ciFailures.forEach((failure, idx) => {
       investigationSteps.push(`   ${String.fromCharCode(97 + idx)}. ${failure}`);
     });
@@ -208,9 +229,9 @@ function buildRetryPrompt(ticket: Ticket, context: ReviewContext): string {
   }
 
   // STEP 3: Review score too low - go read the review
-  if (context.previousScore !== null && context.previousScore !== undefined && context.previousScore < 90) {
-    const step = context.ciFailures && context.ciFailures.length > 0 ? '3' : '2';
-    investigationSteps.push(`\n${step}. **REVIEW SCORE TOO LOW (${context.previousScore}/100)** - Read the review:`);
+  if (context.previousScore !== null && context.previousScore !== undefined && context.previousScore < SCORE_THRESHOLD) {
+    const step = nextStep();
+    investigationSteps.push(`\n${step}. **REVIEW SCORE TOO LOW (${context.previousScore}/100 — the merge gate is ${SCORE_THRESHOLD}/100)** - Read the review:`);
     investigationSteps.push(`   → Run: \`gh pr view ${prNumber} --comments\``);
     investigationSteps.push('   → Find the comment with "QUALITY_SCORE: ' + context.previousScore + '"');
     investigationSteps.push('   → Read what the reviewer says is wrong');
@@ -219,33 +240,88 @@ function buildRetryPrompt(ticket: Ticket, context: ReviewContext): string {
 
   // STEP 4: Merge conflicts - fix them
   if (context.hasMergeConflicts) {
-    const step = String(investigationSteps.filter(s => /^\d+\./.test(s)).length + 1);
+    const step = nextStep();
     investigationSteps.push(`\n${step}. **MERGE CONFLICTS** - Resolve them:`);
-    investigationSteps.push('   → Run: `git fetch origin dev && git rebase origin/dev`');
+    investigationSteps.push('   → Run: `git fetch origin && git rebase origin/main`');
     investigationSteps.push('   → Fix conflicts in each file');
     investigationSteps.push('   → Run: `git rebase --continue`');
   }
 
-  // STEP 5: Review comments - address each one
+  // STEP 5: Review comments - address each one.
+  // Newest first, and already filtered to still-unresolved threads by getRetryContext.
   if (context.inlineComments && context.inlineComments.length > 0) {
-    const step = String(investigationSteps.filter(s => /^\d+\./.test(s)).length + 1);
-    investigationSteps.push(`\n${step}. **REVIEW COMMENTS (${context.inlineComments.length})** - Address each:`);
-    context.inlineComments.slice(0, 5).forEach((comment, idx) => {
+    const step = nextStep();
+    investigationSteps.push(`\n${step}. **REVIEW COMMENTS ON OPEN THREADS (${context.inlineComments.length}, newest first)** - Address each:`);
+    context.inlineComments.slice(0, MAX_INLINE_COMMENTS).forEach((comment, idx) => {
       investigationSteps.push(`   ${idx + 1}. ${comment}`);
     });
-    if (context.inlineComments.length > 5) {
-      investigationSteps.push(`   ... and ${context.inlineComments.length - 5} more (run \`gh pr view ${prNumber} --comments\` to see all)`);
+    if (context.inlineComments.length > MAX_INLINE_COMMENTS) {
+      investigationSteps.push(`   ... and ${context.inlineComments.length - MAX_INLINE_COMMENTS} more (run \`gh pr view ${prNumber} --comments\` to see all)`);
     }
   }
 
-  // STEP 6: User messages - read and respond
+  // STEP 6: Open review threads - these are what branch protection actually gates on.
+  if (context.unresolvedThreads && context.unresolvedThreads.length > 0) {
+    const threads = context.unresolvedThreads;
+    const step = nextStep();
+    investigationSteps.push(`\n${step}. **${threads.length} REVIEW THREAD(S) ARE OPEN AND BLOCK THE MERGE**`);
+    investigationSteps.push('   `required_conversation_resolution` is on: one open thread makes the merge return 405,');
+    investigationSteps.push(`   no matter how high the score is. Repo ${repoOwner}/${repoName}, PR #${prNumber}.`);
+
+    threads.forEach((t, idx) => {
+      const where = `${t.path ?? '(no file)'}${t.line ? `:${t.line}` : ''}`;
+      investigationSteps.push(`   ${idx + 1}. ${where}${t.isOutdated ? ' (outdated — still blocks)' : ''}  thread id: ${t.threadId}`);
+      investigationSteps.push(`      > ${t.firstComment.replace(/\s+/g, ' ').slice(0, 300)}`);
+      if (t.decision === 'no_reply') {
+        investigationSteps.push('      STATUS: nobody has replied. Fix it, reply, then resolve.');
+      } else if (t.decision === 'unbacked_claim') {
+        investigationSteps.push(`      STATUS: ⚠️ you claimed this was addressed but no commit since the review comment touches ${t.path ?? 'any file'}.`);
+        investigationSteps.push(`      (${t.reason}.) Work that landed BEFORE the review does not count as addressing it.`);
+        investigationSteps.push('      Either change that file for real, or say plainly that no change is needed and why.');
+      } else if (t.decision === 'unverifiable') {
+        investigationSteps.push(`      STATUS: ⚠️ cannot be auto-resolved — ${t.reason}.`);
+        investigationSteps.push('      Reply, then resolve this thread yourself; the orchestrator will not do it for you.');
+      } else {
+        investigationSteps.push(`      STATUS: replied and backed by a post-review commit (${t.reason}) — the orchestrator will resolve this one.`);
+      }
+    });
+
+    investigationSteps.push('   → Fixing the code is NOT enough. Each thread needs a reply that says WHAT you changed');
+    investigationSteps.push('     and WHY, with the commit sha — not "done":');
+    investigationSteps.push(`     Reply:   \`gh api repos/${repoOwner}/${repoName}/pulls/${prNumber}/comments/COMMENT_ID/replies -f body="..."\``);
+    investigationSteps.push(`     List:    \`gh api graphql -f query='{repository(owner:"${repoOwner}",name:"${repoName}"){pullRequest(number:${prNumber}){reviewThreads(first:50){nodes{id isResolved comments(first:1){nodes{databaseId path}}}}}}}'\``);
+    investigationSteps.push('     Resolve: `gh api graphql -f query=\'mutation{resolveReviewThread(input:{threadId:"ID"}){thread{isResolved}}}\'`');
+    investigationSteps.push('     A thread stays unresolved after a reply and after the code under it changes (outdated');
+    investigationSteps.push('     threads still block) — resolving is a separate, deliberate act.');
+    investigationSteps.push('   → IF YOU DISAGREE with a comment: reply with your reasoning AND resolve the thread.');
+    investigationSteps.push('     Leaving it open is not a neutral act — nobody is watching, so the PR just sits at 405.');
+    investigationSteps.push('   → ONLY IF it is a genuine judgement call that a human must make: reply saying so, start');
+    investigationSteps.push('     that reply with `NEEDS HUMAN DECISION:`, put the same line at the top of');
+    investigationSteps.push('     `.claude-handoff.md`, leave the thread open and STOP. Do not push more commits.');
+    investigationSteps.push('     The run is then parked for review instead of burning attempts.');
+  }
+
+  // STEP 7: User messages - read and respond
   if (context.userMessages && context.userMessages.length > 0) {
-    const step = String(investigationSteps.filter(s => /^\d+\./.test(s)).length + 1);
+    const step = nextStep();
     investigationSteps.push(`\n${step}. **USER MESSAGES** - The user said:`);
     context.userMessages.forEach((msg, idx) => {
       investigationSteps.push(`   ${idx + 1}. ${msg}`);
     });
   }
+
+  return investigationSteps;
+}
+
+/**
+ * Directive retry prompt - tells agent exactly what to investigate and fix
+ * No passive information dumps - clear action items only
+ *
+ * NOTE: Retries skip holistic analysis since it was done in first attempt
+ */
+function buildRetryPrompt(ticket: Ticket, context: ReviewContext): string {
+  const prNumber = ticket.pr_number;
+  const investigationSteps = buildInvestigationSteps(context, prNumber);
 
   // Failure analysis warning - if repeating same mistakes
   const repeatedPatternsWarning = (context.failureAnalysis && context.failureAnalysis.repeatedPatterns.length > 0)
@@ -273,7 +349,7 @@ ${ticket.handoff_notes.length > 500 ? ticket.handoff_notes.slice(0, 500) + '\n..
     : '';
 
   // Review feedback details (if score was low)
-  const reviewDetailsSection = (context.reviewFeedback && context.previousScore !== null && context.previousScore !== undefined && context.previousScore < 90)
+  const reviewDetailsSection = (context.reviewFeedback && context.previousScore !== null && context.previousScore !== undefined && context.previousScore < SCORE_THRESHOLD)
     ? `## Specific Review Feedback:
 
 ${context.reviewFeedback}
@@ -296,7 +372,7 @@ ${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}## After Inves
 4. Update handoff notes: Update \`.claude-handoff.md\` with what you fixed (don't commit it)
 
 **Remember:**
-- PRs target dev branch
+- PRs target main (there is no dev branch)
 - No "by Claude" in commits/PRs
 - If the issue requires unrelated changes, create a follow-up issue instead: \`gh issue create --title "Follow-up: ..." --label "claude-review"\`
 `;
@@ -326,9 +402,64 @@ IMPORTANT: Do NOT include "by Claude", "authored by Claude", or similar phrases 
  * Build a prompt for a batch agent that handles multiple related issues
  * INCLUDES HOLISTIC ANALYSIS for finding shared patterns across batch
  */
-export function buildBatchAgentPrompt(batch: Batch, tickets: Ticket[]): string {
-  const repoOwner = process.env.GITHUB_OWNER || 'OWNER';
-  const repoName = process.env.GITHUB_REPO || 'REPO';
+/**
+ * Retry prompt for a batch PR. Same investigation checklist as the single-ticket
+ * retry (buildInvestigationSteps) — only the header and the "all N issues still have
+ * to stay fixed" framing differ.
+ */
+function buildBatchRetryPrompt(batch: Batch, tickets: Ticket[], context: ReviewContext): string {
+  const prNumber = batch.pr_number;
+  const investigationSteps = buildInvestigationSteps(context, prNumber);
+
+  const handoffSection = tickets[0]?.handoff_notes
+    ? `## What Previous Attempt Did:
+
+${tickets[0].handoff_notes!.length > 500 ? tickets[0].handoff_notes!.slice(0, 500) + '\n...[truncated]' : tickets[0].handoff_notes}
+
+`
+    : '';
+
+  const reviewDetailsSection = context.reviewFeedback
+    ? `## Specific Review Feedback:
+
+${context.reviewFeedback}
+
+`
+    : '';
+
+  return `BATCH ${batch.id} (${batch.area_key}): ${tickets.length} issue(s)
+PR #${prNumber} - Attempt #${batch.attempt_count}
+
+## Issues This PR Must Still Close
+${tickets.map(t => `- #${t.github_issue_number}: ${t.title}`).join('\n')}
+
+## WHAT YOU MUST DO NOW:
+
+${investigationSteps.join('\n')}
+
+${handoffSection}${reviewDetailsSection}## After Investigating, Fix The Issues:
+
+1. Make the necessary changes — WITHOUT regressing any of the ${tickets.length} issues above
+2. Test locally: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
+3. Commit and push: \`git add . && git commit -m "Fix: [what you fixed]" && git push\`
+4. Update handoff notes: Update \`.claude-handoff.md\` with what you fixed (don't commit it)
+
+**Remember:**
+- One PR closes all ${tickets.length} issues — do NOT open another
+- PRs target main (there is no dev branch)
+- No "by Claude" in commits/PRs
+`;
+}
+
+export function buildBatchAgentPrompt(batch: Batch, tickets: Ticket[], context?: ReviewContext): string {
+  const repoOwner = context?.repoOwner || process.env.GITHUB_OWNER || 'OWNER';
+  const repoName = context?.repoName || process.env.GITHUB_REPO || 'REPO';
+
+  // Same rule as buildAgentPrompt: once there is a PR to fix, the retry prompt replaces
+  // the greenfield one.
+  if (context && batch.pr_number) {
+    return buildBatchRetryPrompt(batch, tickets, context);
+  }
   const issueNumbers = tickets.map(t => t.github_issue_number);
   const closesClause = issueNumbers.map(n => `Closes #${n}`).join('\n');
 
@@ -358,7 +489,9 @@ ${issuesSection}
 **BEFORE planning implementation**, run holistic analysis to find shared patterns:
 
 \`\`\`bash
-/holistic "Batch work for ${batch.area_key}: Issues ${issueNumbers.join(', ')}"
+Load \`libs-index\`, \`server-layering\` and \`mr-contract\` before touching
+${batch.area_key}. They are the maintained answer to what already exists and
+where new code belongs — do not re-derive it per issue.
 \`\`\`
 
 ### Why This Is ESPECIALLY Important for Batches
@@ -408,12 +541,13 @@ If 3 issues all need "validation", holistic might find:
 
 **IMPORTANT:** Use \`queue-run\` for all test/lint/build commands. This prevents resource contention when multiple agents run simultaneously.
 
+
 ## CORE PRINCIPLES
 
 - **Reuse Over Reinvent** - Holistic found shared code? Use it for ALL issues
 - **Simple is Better** - Don't over-engineer
 - **Small Commits are OK** - But they should build toward solving ALL issues
-- **PRs Target dev** - All PRs must target the \`dev\` branch, NOT \`main\`
+- **PRs Target main** - the single-branch pipeline retired \`dev\`
 - **Scope Guard** - For unrelated improvements, create follow-up issues
 
 ## WORKFLOW
@@ -422,9 +556,9 @@ If 3 issues all need "validation", holistic might find:
 2. **Analyze** all ${tickets.length} issues and plan unified approach based on findings
 3. **Implement** solutions (may require multiple commits)
 4. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
-5. **Rebase on dev**: \`git fetch origin dev && git rebase origin/dev\`
+5. **Rebase on main**: \`git fetch origin && git rebase origin/main\`
 6. **Write handoff notes** (see below)
-7. **Push and create PR**: \`gh pr create --base dev --title "..." --body "..."\`
+7. **Push and create PR**: \`gh pr create --base main --title "..." --body "..."\`
 
 ## PR Format (CRITICAL - Must Close All Issues)
 

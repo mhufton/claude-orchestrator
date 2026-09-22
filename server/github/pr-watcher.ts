@@ -1,9 +1,10 @@
 import * as github from './client';
 import * as db from '../db';
 import { logStateTransition, archiveTicketLogs } from '../db';
-import { parseReviewScore, getReviewFeedback } from './score-parser';
+import { getReviewFeedback } from './score-parser';
 import { broadcastTicketUpdated, broadcastSlotStatus, broadcastChatMessagesDelivered } from '../ws/handler';
 import { spawnAgent } from '../agents/spawner';
+import { spawnBatchAgent, isBatchAgentRunning } from '../agents/batch-spawner';
 import { acquireSlot } from '../worktrees/pool';
 import { recordPRWatchStart, recordPRWatchComplete, addActivity, setPRWatchInterval } from '../poll-status';
 import { tryAcquireRespawnLock } from '../agents/respawn-coordinator';
@@ -11,18 +12,10 @@ import { addToQueue, isInQueue } from '../merge-queue/manager';
 import { completeBatch } from '../state/machine';
 import { categorizeError } from '../agents/error-types';
 import { analyzeAgentFailure } from '../agents/failure-analyzer';
-import type { Ticket, Batch } from '../state/types';
-
-const SCORE_THRESHOLD = 90;
-
-// Maximum attempts before requiring human intervention
-// After this many attempts, stop auto-respawning and flag for attention
-// Keep low - if agent can't solve in 3 attempts, it needs human guidance
-const MAX_AUTO_ATTEMPTS = 3;
-
-// Minimum time (in ms) that all checks must be completed before we consider merging
-// This prevents merging when new checks are still being created
-const MIN_CHECK_STABILITY_MS = 30000; // 30 seconds
+import { evaluateMergeBlockers } from './merge-blockers';
+import { getPRReviewContext } from './review-context';
+import { MAX_AUTO_ATTEMPTS } from '../config';
+import type { Ticket, Batch, ReviewContext, UnresolvedThreadContext } from '../state/types';
 
 interface WatchResult {
   action: 'waiting' | 'back_to_progress' | 'completed' | 'error' | 'respawned';
@@ -190,6 +183,22 @@ async function respawnForIssue(
   };
 }
 
+/** Tickets we have already filed a follow-up issue for, so a requeue does not file another. */
+const followUpIssueCreated = new Set<number>();
+
+const MAX_FOLLOW_UP_SUGGESTIONS = 10;
+
+/** Pull bullet/numbered items out of review prose for the follow-up issue body. */
+function extractSuggestions(feedback: string): string[] {
+  return feedback
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => /^([-*•]|\d+[.)])\s+/.test(line))
+    .map(line => line.replace(/^([-*•]|\d+[.)])\s+/, '').trim())
+    .filter(line => line.length >= 10)
+    .slice(0, MAX_FOLLOW_UP_SUGGESTIONS);
+}
+
 export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
   if (!ticket.pr_number) {
     return { action: 'waiting', reason: 'No PR number' };
@@ -227,6 +236,14 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     // Check if PR was closed without merging
     if (pr.state === 'closed') {
       return { action: 'waiting', reason: 'PR closed without merge' };
+    }
+
+    // A batch PR is owned by its batch, not by the tickets inside it: the fix has to
+    // come from a batch agent, and the attempt cap has to be counted once. Letting
+    // each constituent ticket evaluate the same PR gave N respawns of the WRONG kind
+    // of agent and N merge-queue entries. watchBatchPR handles it.
+    if (ticket.batch_id) {
+      return { action: 'waiting', reason: `PR owned by batch ${ticket.batch_id}` };
     }
 
     // CRITICAL SAFETY CHECK: Verify branch HEAD matches PR head SHA
@@ -292,74 +309,32 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
     }
 
     // ==========================================
-    // BRANCH IS CLEAN - NOW CHECK CI STATUS
+    // BRANCH IS CLEAN - NOW APPLY THE MERGE-BLOCKING RULES (shared with batches)
     // ==========================================
 
-    let checkStatus: { pending: boolean; allPassed: boolean; failures: Array<{ name: string }>; checksCompletedAt: Date | null; checks?: Array<{ name: string; status: string; conclusion: string | null }> } | null = null;
-    try {
-      checkStatus = await github.getCheckStatus(pr.head.sha);
-    } catch (checkError) {
-      console.warn('Could not fetch check status:', checkError instanceof Error ? checkError.message : checkError);
-      updateCIStatus(ticket, 'unknown', []);
-      return { action: 'waiting', reason: 'Cannot verify CI status - waiting' };
+    const report = await evaluateMergeBlockers(ticket.pr_number, pr.head.sha);
+
+    if (report.status !== 'evaluated') {
+      const label: 'unknown' | 'running' = report.status === 'ci_unknown' ? 'unknown' : 'running';
+      updateCIStatus(ticket, label, report.checks);
+      console.log(`PR #${ticket.pr_number}: ${report.reason}`);
+      return { action: 'waiting', reason: report.reason };
     }
 
-    // Update CI status in database for live tracking
-    const ciStatus = checkStatus.pending ? 'running' : (checkStatus.allPassed ? 'passing' : 'failing');
-    updateCIStatus(ticket, ciStatus, checkStatus.checks || []);
+    const { issues, hasCIFailures, hasBlockingComments: hasUnrepliedComments, score, threadOutcome } = report;
 
-    if (checkStatus.pending) {
-      console.log(`PR #${ticket.pr_number}: CI checks still pending`);
-      return { action: 'waiting', reason: 'CI checks pending' };
+    updateCIStatus(ticket, hasCIFailures ? 'failing' : 'passing', report.checks);
+
+    if (threadOutcome.resolved.length > 0) {
+      addActivity('pr_check', `Resolved ${threadOutcome.resolved.length} review thread(s) on PR #${ticket.pr_number}`);
     }
-
-    // SAFETY CHECK: Ensure checks have been stable (completed) for a minimum time
-    if (checkStatus.checksCompletedAt) {
-      const timeSinceCompletion = Date.now() - checkStatus.checksCompletedAt.getTime();
-      if (timeSinceCompletion < MIN_CHECK_STABILITY_MS) {
-        const remainingMs = MIN_CHECK_STABILITY_MS - timeSinceCompletion;
-        console.log(`PR #${ticket.pr_number}: Checks completed ${Math.round(timeSinceCompletion / 1000)}s ago, waiting ${Math.round(remainingMs / 1000)}s more for stability`);
-        return { action: 'waiting', reason: `Waiting for check stability (${Math.round(remainingMs / 1000)}s remaining)` };
-      }
-    }
-
-    // ==========================================
-    // GATHER REMAINING ISSUES (CI failures, score, comments)
-    // ==========================================
-
-    const issues: string[] = [];
-    let hasCIFailures = false;
-    let hasUnrepliedComments = false;
-
-    // Check CI status
-    if (!checkStatus.allPassed) {
-      hasCIFailures = true;
-      const ciFailureNames = checkStatus.failures.map(f => f.name).join(', ');
-      issues.push(`CI failures: ${ciFailureNames}`);
-    }
-
-    // Check review score and unreplied comments
-    const score = await parseReviewScore(ticket.pr_number);
-    const unrepliedComments = await github.getUnrepliedBotComments(ticket.pr_number);
 
     if (score) {
       db.updateTicket(ticket.id, { current_score: score.total });
       broadcastTicketUpdated(ticket.id, { current_score: score.total });
-
-      if (score.total < SCORE_THRESHOLD) {
-        issues.push(`Review score ${score.total}/100 (needs >= ${SCORE_THRESHOLD})`);
-      }
     }
 
-    // Only count unreplied comments as blocking if score is below threshold
-    // If score >= SCORE_THRESHOLD, the reviewer has already judged them as non-blocking
-    // (The score would be lower if the comments were actually important)
-    if (unrepliedComments.length > 0 && (!score || score.total < SCORE_THRESHOLD)) {
-      hasUnrepliedComments = true;
-      issues.push(`${unrepliedComments.length} unreplied review comments`);
-    }
-
-    console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, score=${score?.total ?? 'none'}, unrepliedComments=${unrepliedComments.length}, attempt=${ticket.attempt_count}`);
+    console.log(`PR #${ticket.pr_number}: CI=${hasCIFailures ? 'FAILED' : 'passed'}, score=${score?.total ?? 'none'}, blockers=${issues.length}, unresolved=${threadOutcome.stillOpen.length}, attempt=${ticket.attempt_count}`);
 
     // If there are ANY issues, respawn agent with ALL of them
     // Note: Merge conflicts are already handled earlier in the flow
@@ -378,8 +353,8 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
 
       // Build context for error categorization
       const errorContext = {
-        ciFailures: hasCIFailures ? checkStatus.failures.map(f => ({
-          name: f.name,
+        ciFailures: hasCIFailures ? report.ciFailureNames.map(name => ({
+          name,
           output: undefined // We don't have detailed output here, categorization will use name
         })) : undefined,
         reviewScore: score?.total,
@@ -394,29 +369,28 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
       return { action: 'waiting', reason: 'Waiting for review score' };
     }
 
-    // Score passed - check for minor suggestions before merging
-    // If there were any deductions (score < 100), create follow-up issue
-    if (score.total < 100 && score.feedback) {
-      const suggestions = score.feedback
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.startsWith('-') || line.startsWith('•'))
-        .map(line => line.replace(/^[-•]\s*/, ''));
+    // Add to merge queue instead of merging directly
+    // The merge queue processor will handle the actual merge in FIFO order
+    if (isInQueue(ticket.id)) {
+      console.log(`PR #${ticket.pr_number}: Already in merge queue, waiting`);
+      return { action: 'waiting', reason: 'In merge queue, waiting for turn' };
+    }
 
-      if (suggestions.length > 0) {
+    // Score passed - file the leftover non-blocking suggestions as a follow-up.
+    // Runs here, once, at the moment of queueing: it used to run on every poll, which
+    // filed a duplicate issue every cycle the ticket sat in the queue. Harmless while
+    // `feedback` was always undefined; not harmless now that `### Findings` parses.
+    if (score.total < 100 && score.feedback) {
+      const suggestions = extractSuggestions(score.feedback);
+
+      if (suggestions.length > 0 && !followUpIssueCreated.has(ticket.id)) {
+        followUpIssueCreated.add(ticket.id);
         await github.createFollowUpIssue(
           ticket.github_issue_number,
           ticket.pr_number,
           suggestions
         );
       }
-    }
-
-    // Add to merge queue instead of merging directly
-    // The merge queue processor will handle the actual merge in FIFO order
-    if (isInQueue(ticket.id)) {
-      console.log(`PR #${ticket.pr_number}: Already in merge queue, waiting`);
-      return { action: 'waiting', reason: 'In merge queue, waiting for turn' };
     }
 
     console.log(`PR #${ticket.pr_number}: Ready to merge (score ${score.total}/100), adding to merge queue`);
@@ -585,9 +559,76 @@ export async function watchTicketPR(ticket: Ticket): Promise<WatchResult> {
 }
 
 /**
- * Watch a batch's PR for merge status
- * Simpler than ticket watching - batches don't auto-retry on failure,
- * they just need to detect when the PR is merged
+ * Respawn the batch agent to fix what is blocking its PR.
+ *
+ * The cap is counted on the BATCH, not on its tickets: a 4-ticket batch counting
+ * per ticket would get 4x MAX_AUTO_ATTEMPTS respawns of the same PR, and the tickets
+ * cannot be retried independently anyway — one branch, one PR, all-or-nothing.
+ */
+async function respawnBatchForIssues(batch: Batch, issues: string[]): Promise<WatchResult> {
+  if (isBatchAgentRunning(batch.id)) {
+    return { action: 'waiting', reason: 'Batch agent already running' };
+  }
+
+  if (batch.attempt_count >= MAX_AUTO_ATTEMPTS) {
+    const reason = `Stuck after ${batch.attempt_count} attempts. Issues: ${issues.join('; ')}`;
+    console.log(`[pr-watcher] Batch ${batch.id}: max auto-attempts (${MAX_AUTO_ATTEMPTS}) reached, flagging for human intervention`);
+    db.updateBatch(batch.id, { needs_attention: 1, attention_reason: reason });
+    return { action: 'error', reason: `Maximum attempts (${MAX_AUTO_ATTEMPTS}) reached - requires human intervention` };
+  }
+
+  const tickets = db.getTicketsInBatch(batch.id);
+  if (tickets.length === 0) {
+    return { action: 'error', reason: 'Batch has no tickets to respawn for' };
+  }
+
+  let slot = batch.worktree_slot;
+  if (!slot) {
+    const allocation = await acquireSlot(batch.id, batch.branch_name || `claude/batch-${batch.id}`, 'batch');
+    if (!allocation) {
+      return { action: 'waiting', reason: 'No slots available for batch respawn' };
+    }
+    slot = allocation.slot;
+  }
+
+  const context = await getBatchRetryContext(batch, tickets);
+
+  db.updateBatch(batch.id, {
+    state: 'in_progress',
+    worktree_slot: slot,
+    attempt_count: batch.attempt_count + 1,
+    needs_attention: 0,
+    attention_reason: null,
+  });
+
+  for (const ticket of tickets) {
+    db.updateTicket(ticket.id, {
+      state: 'in_progress',
+      worktree_slot: slot,
+      retry_reason: 'addressing_pr_comments',
+    });
+    broadcastTicketUpdated(ticket.id, {
+      state: 'in_progress',
+      worktree_slot: slot,
+      retry_reason: 'addressing_pr_comments',
+    });
+  }
+
+  broadcastSlotStatus();
+
+  const updatedBatch = db.getBatchById(batch.id)!;
+  spawnBatchAgent(updatedBatch, tickets, context).catch(err => {
+    console.error(`[pr-watcher] Failed to respawn batch agent for batch ${batch.id}:`, err);
+  });
+
+  addActivity('respawn', `Respawned batch ${batch.id}: ${issues.join('; ')}`);
+
+  return { action: 'respawned', reason: `Batch agent respawned to fix: ${issues.join('; ')}` };
+}
+
+/**
+ * Watch a batch's PR: same merge-blocking rules as a single ticket (shared via
+ * evaluateMergeBlockers), plus batch-shaped respawn and completion.
  */
 async function watchBatchPR(batch: Batch): Promise<WatchResult> {
   if (!batch.pr_number) {
@@ -621,7 +662,62 @@ async function watchBatchPR(batch: Batch): Promise<WatchResult> {
       return { action: 'error', reason: 'PR closed without merge' };
     }
 
-    return { action: 'waiting', reason: 'PR still open' };
+    if (pr.mergeable === null) {
+      return { action: 'waiting', reason: 'Checking mergeability...' };
+    }
+
+    if (pr.mergeable_state === 'behind') {
+      const updateResult = await github.updatePRBranch(batch.pr_number);
+      return {
+        action: 'waiting',
+        reason: updateResult.success ? 'Branch updated, waiting for CI' : `Branch update failed: ${updateResult.message}`,
+      };
+    }
+
+    if (pr.mergeable === false) {
+      return await respawnBatchForIssues(batch, ['Merge conflicts with main']);
+    }
+
+    // Same rules as the single-ticket path, including evidence-based thread resolution.
+    const report = await evaluateMergeBlockers(batch.pr_number, pr.head.sha);
+    if (report.status !== 'evaluated') {
+      return { action: 'waiting', reason: report.reason };
+    }
+
+    if (report.threadOutcome.resolved.length > 0) {
+      addActivity('pr_check', `Resolved ${report.threadOutcome.resolved.length} review thread(s) on batch PR #${batch.pr_number}`);
+    }
+
+    if (report.score) {
+      db.updateBatch(batch.id, { current_score: report.score.total });
+    }
+
+    console.log(`[pr-watcher] Batch ${batch.id} PR #${batch.pr_number}: CI=${report.hasCIFailures ? 'FAILED' : 'passed'}, score=${report.score?.total ?? 'none'}, blockers=${report.issues.length}, attempt=${batch.attempt_count}`);
+
+    if (report.issues.length > 0) {
+      return await respawnBatchForIssues(batch, report.issues);
+    }
+
+    if (!report.score) {
+      return { action: 'waiting', reason: 'Waiting for review score' };
+    }
+
+    // Nothing blocks the merge. The queue is keyed by ticket, so the batch rides in on
+    // its lowest-numbered ticket; completeBatch finishes the rest once the PR merges.
+    const tickets = db.getTicketsInBatch(batch.id).sort((a, b) => a.id - b.id);
+    const representative = tickets[0];
+    if (!representative) {
+      return { action: 'error', reason: 'Batch has no tickets to queue' };
+    }
+
+    if (isInQueue(representative.id)) {
+      return { action: 'waiting', reason: 'In merge queue, waiting for turn' };
+    }
+
+    const queueEntry = await addToQueue(representative.id, batch.pr_number, representative.merge_queue_priority);
+    addActivity('pr_check', `Batch PR #${batch.pr_number} added to merge queue (position ${queueEntry.position})`);
+
+    return { action: 'waiting', reason: `Added to merge queue at position ${queueEntry.position}`, score: report.score.total };
   } catch (error) {
     console.error(`Error watching PR for batch ${batch.id}:`, error);
     return {
@@ -718,6 +814,42 @@ export function startPRWatchLoop(intervalMs: number): void {
 }
 
 /**
+ * Retry context for a BATCH agent.
+ *
+ * Shares `getPRReviewContext` and `getReviewFeedback` with the single-ticket path;
+ * what differs is only where the score, handoff notes and chat messages live — a
+ * batch has one score and N tickets, so the messages are collected across them.
+ */
+export async function getBatchRetryContext(batch: Batch, tickets: Ticket[]): Promise<ReviewContext> {
+  const prContext = batch.pr_number ? await getPRReviewContext(batch.pr_number) : null;
+  const reviewFeedback = batch.pr_number
+    ? await getReviewFeedback(batch.pr_number)
+    : 'No previous PR review found.';
+
+  const userMessages: string[] = [];
+  for (const ticket of tickets) {
+    const pending = db.getPendingChatMessages(ticket.id);
+    if (pending.length === 0) continue;
+    userMessages.push(...pending.map(m => `(#${ticket.github_issue_number}) ${m.content}`));
+    db.markChatMessagesDelivered(ticket.id);
+    broadcastChatMessagesDelivered(ticket.id);
+  }
+
+  return {
+    previousScore: batch.current_score,
+    reviewFeedback,
+    ciFailures: prContext?.ciFailures ?? [],
+    inlineComments: prContext?.inlineComments ?? [],
+    botComments: prContext?.botComments ?? [],
+    userMessages,
+    hasMergeConflicts: prContext?.hasMergeConflicts ?? false,
+    repoOwner: prContext?.repoOwner ?? github.getRepoInfo().owner,
+    repoName: prContext?.repoName ?? github.getRepoInfo().repo,
+    unresolvedThreads: prContext?.unresolvedThreads ?? [],
+  };
+}
+
+/**
  * Get context for re-starting an agent after review failure or stall
  */
 export async function getRetryContext(ticket: Ticket): Promise<{
@@ -733,6 +865,9 @@ export async function getRetryContext(ticket: Ticket): Promise<{
   filesModified: string[];
   agentIntent: string;
   hasMergeConflicts: boolean;
+  repoOwner: string;
+  repoName: string;
+  unresolvedThreads: UnresolvedThreadContext[];
   failureAnalysis?: {
     category: string;
     description: string;
@@ -747,52 +882,9 @@ export async function getRetryContext(ticket: Ticket): Promise<{
     : 'No previous PR review found.';
 
   // Get CI failures and PR feedback
-  let ciFailures: string[] = [];
-  let inlineComments: string[] = [];
-  let botComments: string[] = [];
-  let hasMergeConflicts = false;
-
-  if (ticket.pr_number) {
-    try {
-      const pr = await github.getPR(ticket.pr_number);
-
-      // Check for merge conflicts from actual PR state
-      hasMergeConflicts = pr.mergeable === false;
-
-      // Get all PR feedback in parallel
-      const prFeedback = await github.getPRFeedback(ticket.pr_number, pr.head.sha);
-
-      // CI failures with actionable details (truncated to save tokens)
-      ciFailures = prFeedback.checkFailures.map(f => {
-        const output = f.output.summary || f.output.text || '';
-        const url = f.html_url || f.details_url || '';
-        // Give the agent actionable information - truncate verbose output
-        let info = `**${f.name}** FAILED`;
-        if (output && output !== 'No details') {
-          const truncatedOutput = output.length > 300 ? output.slice(0, 300) + '...' : output;
-          info += `: ${truncatedOutput}`;
-        }
-        if (url) {
-          info += `\n   Run: \`gh run view --job ${f.id} --log-failed\` for full logs`;
-        }
-        return info;
-      });
-
-      // Inline code review comments (include ID for replies)
-      inlineComments = prFeedback.reviewComments.map(c => {
-        return `[Comment ID: ${c.id}] ${c.path}${c.line ? `:${c.line}` : ''} (@${c.user.login}): ${c.body}`;
-      });
-
-      // Bot comments (GitHub Actions, code review bots, etc.)
-      const botUsernames = ['github-actions', 'github-actions[bot]', 'codecov', 'codecov[bot]', 'sonarcloud', 'sonarcloud[bot]'];
-      botComments = prFeedback.issueComments
-        .filter(c => botUsernames.some(bot => c.user.login.toLowerCase().includes(bot.replace('[bot]', ''))))
-        .map(c => `@${c.user.login}: ${c.body.slice(0, 500)}${c.body.length > 500 ? '...' : ''}`);
-
-    } catch (err) {
-      console.warn('Error getting PR feedback:', err);
-    }
-  }
+  const prContext = ticket.pr_number
+    ? await getPRReviewContext(ticket.pr_number)
+    : null;
 
   // Get recent activity from logs - limit to reduce token usage
   const logs = db.getLogsForTicket(ticket.id, 20);
@@ -902,16 +994,19 @@ export async function getRetryContext(ticket: Ticket): Promise<{
   return {
     previousScore: ticket.current_score,
     reviewFeedback: feedback,
-    ciFailures,
-    inlineComments,
-    botComments,
+    ciFailures: prContext?.ciFailures ?? [],
+    inlineComments: prContext?.inlineComments ?? [],
+    botComments: prContext?.botComments ?? [],
     userMessages,
     lastActivity,
     recentToolCalls,
     recentErrors,
     filesModified: Array.from(filesModified),
     agentIntent,
-    hasMergeConflicts,
+    hasMergeConflicts: prContext?.hasMergeConflicts ?? false,
+    repoOwner: prContext?.repoOwner ?? github.getRepoInfo().owner,
+    repoName: prContext?.repoName ?? github.getRepoInfo().repo,
+    unresolvedThreads: prContext?.unresolvedThreads ?? [],
     failureAnalysis: failureAnalysis ? {
       category: failureAnalysis.category,
       description: failureAnalysis.description,

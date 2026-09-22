@@ -2,11 +2,12 @@ import { spawn, type Subprocess } from 'bun';
 import { join, dirname } from 'path';
 import * as db from '../db';
 import { getWorktreePath } from '../worktrees/manager';
-import { buildBatchAgentPrompt } from './prompts';
+import { buildBatchAgentPrompt } from './prompts.holistic';
 import { broadcastAgentOutput, broadcastAgentTodos, broadcastSlotStatus, type AgentTodo } from '../ws/handler';
 import { moveBatchToReview, failBatch } from '../state/machine';
 import { getPRsForBranch, getPRsForBranchPrefix, getPRsForMultipleIssues } from '../github/client';
-import type { Batch, Ticket } from '../state/types';
+import type { Batch, Ticket, ReviewContext } from '../state/types';
+import { CLAUDE_BIN } from '../config';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
 const ORCHESTRATOR_BIN = join(dirname(dirname(import.meta.dir)), 'bin');
@@ -72,7 +73,7 @@ function selectBatchModel(tickets: Ticket[]): 'opus' | 'sonnet' {
 /**
  * Spawn an agent to work on a batch of tickets
  */
-export async function spawnBatchAgent(batch: Batch, tickets: Ticket[]): Promise<BatchAgentResult> {
+export async function spawnBatchAgent(batch: Batch, tickets: Ticket[], context?: ReviewContext): Promise<BatchAgentResult> {
   const slot = batch.worktree_slot;
   if (!slot) {
     throw new Error('Batch has no worktree slot assigned');
@@ -93,7 +94,7 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[]): Promise<
 
   try {
     const worktreePath = getWorktreePath(slot);
-    const prompt = buildBatchAgentPrompt(batch, tickets);
+    const prompt = buildBatchAgentPrompt(batch, tickets, context);
     const model = selectBatchModel(tickets);
 
     console.log(`[batch] Spawning agent for batch ${batch.id} (${tickets.length} tickets) in slot ${slot}`);
@@ -101,7 +102,7 @@ export async function spawnBatchAgent(batch: Batch, tickets: Ticket[]): Promise<
     console.log(`[batch] Model: ${model}`);
 
     const proc = spawn([
-      '/opt/homebrew/bin/claude',
+      CLAUDE_BIN,
       '--print',
       '--verbose',
       '--model', model,

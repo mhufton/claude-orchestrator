@@ -42,6 +42,20 @@ async function processQueue(): Promise<void> {
 }
 
 /**
+ * Hand a ticket back to the PR watcher instead of parking it in needs_attention.
+ * Dropping it out of the queue is what lets the watcher act on it again — it skips
+ * anything still queued.
+ */
+function returnToWatcher(ticketId: number, prNumber: number, reason: string): void {
+  console.log(`[merge-queue] Returning PR #${prNumber} to the watcher: ${reason}`);
+  db.removeFromMergeQueue(ticketId);
+  db.updateTicket(ticketId, { needs_attention: 0, attention_reason: null });
+  broadcastTicketUpdated(ticketId, { needs_attention: 0, attention_reason: null });
+  addActivity('pr_check', `PR #${prNumber} left the merge queue: ${reason}`);
+  broadcastMergeQueueUpdated();
+}
+
+/**
  * Process a single lane
  */
 async function processLane(lane: string): Promise<void> {
@@ -146,6 +160,26 @@ async function processLane(lane: string): Promise<void> {
     // Continue anyway - CI check might not be required
   }
 
+  // `blocked` is what GitHub reports when branch protection will refuse the merge —
+  // including `required_conversation_resolution`. Calling mergePR anyway returns 405
+  // and the ticket dead-ends in needs_attention with nobody to attend to it.
+  if (pr.mergeable_state === 'blocked') {
+    let openThreads = 0;
+    try {
+      openThreads = (await github.getUnresolvedReviewThreads(ticket.pr_number)).length;
+    } catch (err) {
+      console.warn(`[merge-queue] Could not check review threads for PR #${ticket.pr_number}:`, err);
+    }
+
+    if (openThreads > 0) {
+      returnToWatcher(entry.ticket_id, ticket.pr_number, `${openThreads} unresolved review thread(s)`);
+      return;
+    }
+    // Blocked for some other reason (missing approval, required check) — fall through
+    // and let the merge attempt report it.
+    console.log(`[merge-queue] PR #${ticket.pr_number} is blocked but has no unresolved threads, attempting merge`);
+  }
+
   // Start the merge
   console.log(`[merge-queue] Starting merge for PR #${ticket.pr_number}`);
   if (!db.startMerging(entry.id)) {
@@ -170,6 +204,15 @@ async function processLane(lane: string): Promise<void> {
 
       // Archive the ticket
       await archiveTicket(entry.ticket_id);
+    } else if (result.errorCode === 405) {
+      // 405 = branch protection refused (almost always an unresolved thread that
+      // appeared between our check and the merge). Recoverable: hand it back to the
+      // watcher, which resolves what the evidence backs and respawns for the rest.
+      const errorMsg = result.error || 'Merge not allowed';
+      console.log(`[merge-queue] PR #${ticket.pr_number} refused with 405: ${errorMsg}`);
+      db.failMerge(entry.id, errorMsg);
+      returnToWatcher(entry.ticket_id, ticket.pr_number, `merge refused (405): ${errorMsg}`);
+      broadcastMergeCompleted(entry.ticket_id, ticket.pr_number, false, errorMsg);
     } else {
       const errorMsg = result.error || 'Merge failed';
       console.log(`[merge-queue] Merge failed for PR #${ticket.pr_number}: ${errorMsg}`);

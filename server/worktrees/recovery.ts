@@ -2,6 +2,7 @@ import { $ } from 'bun';
 import { existsSync } from 'fs';
 import { getWorktreePath } from './manager';
 import { spawn } from 'bun';
+import { BASE_BRANCH } from '../config';
 
 export interface WorktreeState {
   slot: number;
@@ -82,12 +83,12 @@ export async function diagnoseWorktree(slot: number): Promise<WorktreeState> {
 
     // Check how far behind/ahead of dev
     try {
-      await $`git -C ${path} fetch origin dev`.quiet();
+      await $`git -C ${path} fetch origin ${BASE_BRANCH}`.quiet();
 
-      const behindResult = await $`git -C ${path} rev-list --count HEAD..origin/dev`.quiet();
+      const behindResult = await $`git -C ${path} rev-list --count HEAD..origin/${BASE_BRANCH}`.quiet();
       state.behindDev = parseInt(behindResult.text().trim()) || 0;
 
-      const aheadResult = await $`git -C ${path} rev-list --count origin/dev..HEAD`.quiet();
+      const aheadResult = await $`git -C ${path} rev-list --count origin/${BASE_BRANCH}..HEAD`.quiet();
       state.aheadOfDev = parseInt(aheadResult.text().trim()) || 0;
     } catch {
       // Can't determine ahead/behind
@@ -173,12 +174,12 @@ git diff HEAD
 - \`git rebase --abort\` or \`git merge --abort\`
 - \`git checkout -- .\` to discard local changes
 - \`git clean -fd\` to remove untracked files
-- Then start fresh: \`git fetch origin dev && git rebase origin/dev\`
+- Then start fresh: \`git fetch origin ${BASE_BRANCH} && git rebase origin/${BASE_BRANCH}\`
 
 **Option C: Hard reset** (last resort - loses uncommitted work)
 - Save any important changes first (copy files if needed)
-- \`git fetch origin dev\`
-- \`git reset --hard origin/dev\`
+- \`git fetch origin ${BASE_BRANCH}\`
+- \`git reset --hard origin/${BASE_BRANCH}\`
 - Re-apply changes manually if needed
 
 ### Step 3: Verify Recovery
@@ -305,8 +306,8 @@ export async function forceResetWorktree(slot: number): Promise<boolean> {
     await $`git -C ${path} clean -fd`.quiet();
 
     // Fetch and reset to dev
-    await $`git -C ${path} fetch origin dev`.quiet();
-    await $`git -C ${path} reset --hard origin/dev`.quiet();
+    await $`git -C ${path} fetch origin ${BASE_BRANCH}`.quiet();
+    await $`git -C ${path} reset --hard origin/${BASE_BRANCH}`.quiet();
 
     console.log(`[recovery] Force reset complete for slot ${slot}`);
     return true;

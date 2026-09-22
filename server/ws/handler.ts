@@ -3,7 +3,7 @@ import * as db from '../db';
 import { startTicket, stopTicket, retryTicket, archiveTicket, displaceForUrgent } from '../state/machine';
 import { getPR, getPRComments, getPRReviewComments, getCheckStatus, addLabelToIssue, getBranchHeadSha } from '../github/client';
 import { syncIssues } from '../github/issues';
-import { loadConfig } from '../config';
+import { loadConfig, SCORE_THRESHOLD } from '../config';
 import { chat as dispatcherChat, stopDispatcher } from '../agents/dispatcher';
 import { parseReviewScore } from '../github/score-parser';
 import { getAllTicketTodos, stopAgent, spawnAgent, isAgentRunning } from '../agents/spawner';
@@ -291,8 +291,7 @@ export async function handleMessage(ws: ServerWebSocket<unknown>, rawMessage: st
           console.warn('Could not fetch check status (token may lack permissions):', checkError instanceof Error ? checkError.message : checkError);
         }
 
-        // Quality score < 90 counts as pipeline failure
-        const SCORE_THRESHOLD = 90;
+        // A score under the merge gate counts as a pipeline failure
         if (score && score.total < SCORE_THRESHOLD && ciStatus !== 'pending') {
           ciStatus = 'failure';
         }

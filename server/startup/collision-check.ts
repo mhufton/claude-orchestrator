@@ -15,9 +15,10 @@ import type { Ticket } from '../state/types';
 export interface CollisionIssue {
   ticketId: number;
   issueNumber: number;
-  type: 'pr_merged' | 'pr_closed' | 'issue_closed' | 'branch_diverged' | 'worktree_missing' | 'worktree_dirty';
+  type: 'pr_merged' | 'pr_closed' | 'issue_closed' | 'branch_diverged' | 'worktree_missing' | 'worktree_dirty' | 'worktree_stale';
   message: string;
-  autoFix?: boolean; // Can this be auto-fixed?
+  autoFix?: boolean; // Can this be auto-fixed by moving the ticket to done?
+  slot?: number;     // Worktree slot, for issues that can be recovered by cleaning it
 }
 
 export interface CollisionCheckResult {
@@ -117,16 +118,30 @@ async function checkTicket(ticket: Ticket): Promise<CollisionIssue[]> {
       return issues; // Can't check further without worktree
     }
 
-    // Check if worktree is dirty (uncommitted changes)
+    // Check if worktree is dirty (uncommitted changes).
+    //
+    // Dirt only needs a human when it could BE this ticket's work. If the slot is
+    // checked out on some other branch, the contents provably belong to a previous
+    // occupant, so the slot can be reclaimed automatically instead of parking the
+    // ticket forever (which previously burned its whole retry budget).
     try {
       const status = execSync(`cd "${worktreePath}" && git status --porcelain`, { encoding: 'utf-8' });
       if (status.trim()) {
+        const currentBranch = execSync(
+          `cd "${worktreePath}" && git rev-parse --abbrev-ref HEAD`,
+          { encoding: 'utf-8' }
+        ).trim();
+        const ownsWorktree = ticket.branch_name !== null && currentBranch === ticket.branch_name;
+
         issues.push({
           ticketId: ticket.id,
           issueNumber: ticket.github_issue_number,
-          type: 'worktree_dirty',
-          message: `Worktree has uncommitted changes`,
-          autoFix: false // Needs human review
+          type: ownsWorktree ? 'worktree_dirty' : 'worktree_stale',
+          message: ownsWorktree
+            ? `Worktree has uncommitted changes on this ticket's own branch (${currentBranch})`
+            : `Slot ${ticket.worktree_slot} holds leftovers from "${currentBranch}", not this ticket's branch (${ticket.branch_name ?? 'none assigned'})`,
+          autoFix: false, // Neither is fixed by moving the ticket to done
+          slot: ticket.worktree_slot
         });
       }
     } catch (err) {
@@ -208,13 +223,53 @@ export async function autoFixCollisions(issues: CollisionIssue[]): Promise<{ fix
 }
 
 /**
- * Flag non-auto-fixable issues for human attention
+ * Reclaim worktree slots whose contents provably belong to a previous occupant.
+ *
+ * Uses the worktree manager's own cleanup path so the recovered slot is in exactly
+ * the state a normal slot release produces. Returns the ticket ids that no longer
+ * have a worktree problem.
+ */
+export async function recoverStaleWorktrees(issues: CollisionIssue[]): Promise<Set<number>> {
+  const recovered = new Set<number>();
+  const reclaimable = issues.filter(i => i.type === 'worktree_stale' && i.slot != null);
+
+  if (reclaimable.length === 0) return recovered;
+
+  const { cleanupWorktree } = await import('../worktrees/manager');
+
+  for (const issue of reclaimable) {
+    try {
+      console.log(`[collision-check] Reclaiming slot ${issue.slot} for #${issue.issueNumber} (${issue.message})`);
+      await cleanupWorktree(issue.slot!);
+      recovered.add(issue.ticketId);
+    } catch (err) {
+      console.error(`[collision-check] Could not reclaim slot ${issue.slot} for #${issue.issueNumber}:`, err);
+    }
+  }
+
+  return recovered;
+}
+
+/**
+ * Flag non-auto-fixable issues for human attention.
+ *
+ * Skips tickets that are already `done` — a collision report about in-flight state
+ * is meaningless once the ticket has completed, and flagging one leaves it both
+ * `done` and `needs_attention`, which warns forever and can never be cleared by
+ * the normal flow.
  */
 export function flagCollisionsForAttention(issues: CollisionIssue[]): number {
   let flagged = 0;
 
   for (const issue of issues) {
     if (issue.autoFix) continue; // Already handled
+
+    const current = db.getTicketById(issue.ticketId);
+    if (!current) continue;
+    if (current.state === 'done') {
+      console.log(`[collision-check] Not flagging ticket ${issue.ticketId} (#${issue.issueNumber}) - already done: ${issue.message}`);
+      continue;
+    }
 
     try {
       db.updateTicket(issue.ticketId, {
@@ -276,16 +331,25 @@ export async function runStartupCollisionCheck(options: { autoFix?: boolean; fla
     }
   }
 
-  if (flagRemaining) {
-    const remaining = result.issues.filter(i => !i.autoFix);
-    if (remaining.length > 0) {
-      console.log(`[collision-check] Flagging ${remaining.length} issues for attention...`);
-      const flagged = flagCollisionsForAttention(remaining);
-      console.log(`[collision-check] Flagged: ${flagged}`);
-    }
+  // Reclaim slots left dirty by a previous run before deciding anything needs a
+  // human. Startup knowing the pool is dirty and starting anyway is what let the
+  // January worktrees eat three tickets' retry budgets.
+  const recoveredTickets = autoFix ? await recoverStaleWorktrees(result.issues) : new Set<number>();
+  if (recoveredTickets.size > 0) {
+    console.log(`[collision-check] Reclaimed ${recoveredTickets.size} stale worktree(s)`);
   }
 
-  const unresolved = result.issues.filter(i => !i.autoFix);
+  const stillBroken = result.issues.filter(
+    i => !i.autoFix && !(i.type === 'worktree_stale' && recoveredTickets.has(i.ticketId))
+  );
+
+  if (flagRemaining && stillBroken.length > 0) {
+    console.log(`[collision-check] Flagging ${stillBroken.length} issues for attention...`);
+    const flagged = flagCollisionsForAttention(stillBroken);
+    console.log(`[collision-check] Flagged: ${flagged}`);
+  }
+
+  const unresolved = stillBroken;
   if (unresolved.length > 0) {
     console.log(`\n[collision-check] WARNING: ${unresolved.length} issues require manual attention before proceeding.`);
     return false;

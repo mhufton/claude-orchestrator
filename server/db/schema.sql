@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS agent_logs (
   timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
   type TEXT,
   content TEXT,
+  model TEXT,
+  attempt_number INTEGER,
   FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
 );
 
