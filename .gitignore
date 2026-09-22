@@ -31,3 +31,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Backup files left by manual editing sessions
+*.bak
+*.bak-*
+
+# Ad-hoc worktree recovery snapshots
+.worktree-snapshot-*/
