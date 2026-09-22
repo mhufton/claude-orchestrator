@@ -82,6 +82,57 @@ function extractTodosFromEvent(event: unknown): AgentTodo[] | null {
   return null;
 }
 
+/** Shape of the CLI's own usage-limit telemetry, a stream-json event like any other. */
+interface RateLimitEvent {
+  type?: string;
+  rate_limit_info?: {
+    status?: string;
+    rateLimitType?: string;
+    unifiedWindows?: Record<string, { utilization?: number }>;
+  };
+}
+
+export interface RateLimitSnapshot {
+  status: string;
+  rateLimitType: string;
+  utilization: Record<string, number>;
+  observedAt: string;
+}
+
+let lastRateLimitSnapshot: RateLimitSnapshot | null = null;
+
+/** Latest usage-limit reading across all agents, for /api/health. */
+export function getRateLimitSnapshot(): RateLimitSnapshot | null {
+  return lastRateLimitSnapshot;
+}
+
+/**
+ * Track the CLI's own rate-limit telemetry and warn when it crosses the CLI's
+ * threshold (surpassedThreshold, currently 0.75 -> status 'allowed_warning').
+ * We don't invent our own threshold; we just decide how loud to be about theirs.
+ */
+export function checkRateLimitEvent(ticketId: number, event: unknown): void {
+  const e = event as RateLimitEvent;
+  const info = e.type === 'rate_limit_event' ? e.rate_limit_info : undefined;
+  if (!info?.status) return;
+
+  const utilization: Record<string, number> = {};
+  for (const [window, data] of Object.entries(info.unifiedWindows || {})) {
+    if (typeof data.utilization === 'number') utilization[window] = data.utilization;
+  }
+  lastRateLimitSnapshot = {
+    status: info.status,
+    rateLimitType: info.rateLimitType || 'unknown',
+    utilization,
+    observedAt: new Date().toISOString(),
+  };
+
+  if (info.status !== 'allowed') {
+    const summary = Object.entries(utilization).map(([w, u]) => `${w}=${Math.round(u * 100)}%`).join(' ');
+    console.warn(`[rate-limit] ticket #${ticketId}: ${info.status} (${info.rateLimitType}) — ${summary}`);
+  }
+}
+
 // Track running agents and their session IDs for continuing conversations
 const runningAgents = new Map<number, Subprocess>();
 const agentSessionIds = new Map<number, string>();
@@ -293,6 +344,7 @@ async function continueAgentConversation(
           const event = JSON.parse(line);
 
           db.insertLog(ticket.id, event.type || 'unknown', JSON.stringify(event));
+          checkRateLimitEvent(ticket.id, event);
           broadcastAgentOutput(ticket.id, {
             type: event.type || 'unknown',
             content: event
@@ -784,6 +836,7 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
 
           // Log to database
           db.insertLog(ticket.id, event.type || 'unknown', JSON.stringify(event));
+          checkRateLimitEvent(ticket.id, event);
 
           // Broadcast to connected clients with full structured event
           broadcastAgentOutput(ticket.id, {

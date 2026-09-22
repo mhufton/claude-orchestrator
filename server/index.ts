@@ -19,7 +19,7 @@ import { startIssueSyncLoop } from './github/issues';
 import { startPRWatchLoop } from './github/pr-watcher';
 import { startBranchUpdateLoop } from './github/branch-updater';
 import { initWorktreeManager } from './worktrees/manager';
-import { stopAllAgents, loadTodosFromDatabase } from './agents/spawner';
+import { stopAllAgents, loadTodosFromDatabase, getRateLimitSnapshot } from './agents/spawner';
 import { startStaleAgentDetector } from './agents/stale-detector';
 import { stopAllReviews } from './agents/reviewer';
 import { initAutoPlay, stopAutoPlay } from './autoplay/loop';
@@ -159,7 +159,7 @@ const server = Bun.serve({
     // API routes
     if (url.pathname === '/api/health') {
       return Response.json(
-        { status: 'ok', timestamp: new Date().toISOString() },
+        { status: 'ok', timestamp: new Date().toISOString(), rateLimit: getRateLimitSnapshot() },
         { headers: corsHeaders }
       );
     }
