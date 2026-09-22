@@ -68,12 +68,20 @@ export async function resetWorktree(slot: number, branchName: string): Promise<v
   }
 
   // Fetch latest dev
-  await $`git -C ${worktreePath} fetch origin dev`.quiet();
+  await $`git -C ${worktreePath} fetch origin ${BASE_BRANCH}`.quiet();
+
+  // A slot being handed to a new ticket must come up clean no matter how the
+  // previous occupant left it — releaseSlot may never have run (crash, kill,
+  // server restart), in which case a leftover rebase/merge or untracked files
+  // would make the checkout below fail and strand the slot.
+  for (const op of ['rebase', 'merge', 'cherry-pick']) {
+    try { await $`git -C ${worktreePath} ${op} --abort`.quiet(); } catch { /* none in progress */ }
+  }
+  await $`git -C ${worktreePath} reset --hard`.quiet();
+  await $`git -C ${worktreePath} clean -fd -e node_modules -e .claude-handoff.md`.quiet();
 
   // Create/reset branch to latest dev and switch to it
-  // Worktree should already be clean from releaseSlot, but reset --hard as safety
-  await $`git -C ${worktreePath} reset --hard`.quiet();
-  await $`git -C ${worktreePath} checkout -B ${branchName} origin/dev`.quiet();
+  await $`git -C ${worktreePath} checkout -B ${branchName} origin/${BASE_BRANCH}`.quiet();
 
   console.log(`Started branch ${branchName} in worktree at ${worktreePath}`);
 }
