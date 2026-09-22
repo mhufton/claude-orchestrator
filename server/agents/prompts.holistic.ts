@@ -118,9 +118,11 @@ Now that you understand the context from holistic analysis, implement the soluti
 
 **BEFORE creating a PR, you MUST verify:**
 1. The actual problem described in the issue is SOLVED
-2. Tests pass (\`npm test\`)
-3. Lint passes (\`npm run lint\`)
-4. Build passes (\`npm run build\`)
+2. Tests pass (\`queue-run test npm test\`)
+3. Lint passes (\`queue-run lint npm run lint\`)
+4. Build passes (\`queue-run build npm run build\`)
+
+**IMPORTANT:** Use \`queue-run\` for all test/lint/build commands. This prevents resource contention when multiple agents run simultaneously. The command will wait in queue if another agent is running tests.
 
 **If you encounter obstacles:** Debug them. Read error messages carefully. Try different approaches.
 
@@ -140,7 +142,7 @@ Now that you understand the context from holistic analysis, implement the soluti
 1. **Run holistic analysis** (Step 0 above)
 2. **Review findings** and plan approach based on existing patterns
 3. **Implement** the solution following discovered patterns
-4. **Verify locally**: \`npm test && npm run lint && npm run build\`
+4. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 5. **Rebase on main**: \`git fetch origin && git rebase origin/main\`
 6. **Write handoff notes** (see below)
 7. **Push and create PR**: \`gh pr create --base main --title "..." --body "..."\`
@@ -365,7 +367,7 @@ ${investigationSteps.join('\n')}
 ${repeatedPatternsWarning}${handoffSection}${reviewDetailsSection}## After Investigating, Fix The Issues:
 
 1. Make the necessary changes
-2. Test locally: \`npm test && npm run lint && npm run build\`
+2. Test locally: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 3. Commit and push: \`git add . && git commit -m "Fix: [what you fixed]" && git push\`
 4. Update handoff notes: Update \`.claude-handoff.md\` with what you fixed (don't commit it)
 
@@ -438,7 +440,7 @@ ${investigationSteps.join('\n')}
 ${handoffSection}${reviewDetailsSection}## After Investigating, Fix The Issues:
 
 1. Make the necessary changes — WITHOUT regressing any of the ${tickets.length} issues above
-2. Test locally: \`npm test && npm run lint && npm run build\`
+2. Test locally: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 3. Commit and push: \`git add . && git commit -m "Fix: [what you fixed]" && git push\`
 4. Update handoff notes: Update \`.claude-handoff.md\` with what you fixed (don't commit it)
 
@@ -533,9 +535,11 @@ If 3 issues all need "validation", holistic might find:
 
 **BEFORE creating a PR, you MUST verify:**
 1. ALL ${tickets.length} issues in the batch are addressed
-2. Tests pass (\`npm test\`)
-3. Lint passes (\`npm run lint\`)
-4. Build passes (\`npm run build\`)
+2. Tests pass (\`queue-run test npm test\`)
+3. Lint passes (\`queue-run lint npm run lint\`)
+4. Build passes (\`queue-run build npm run build\`)
+
+**IMPORTANT:** Use \`queue-run\` for all test/lint/build commands. This prevents resource contention when multiple agents run simultaneously.
 
 
 ## CORE PRINCIPLES
@@ -551,7 +555,7 @@ If 3 issues all need "validation", holistic might find:
 1. **Run holistic analysis** (Step 0 above) to find shared patterns
 2. **Analyze** all ${tickets.length} issues and plan unified approach based on findings
 3. **Implement** solutions (may require multiple commits)
-4. **Verify locally**: \`npm test && npm run lint && npm run build\`
+4. **Verify locally**: \`queue-run test npm test && queue-run lint npm run lint && queue-run build npm run build\`
 5. **Rebase on main**: \`git fetch origin && git rebase origin/main\`
 6. **Write handoff notes** (see below)
 7. **Push and create PR**: \`gh pr create --base main --title "..." --body "..."\`
