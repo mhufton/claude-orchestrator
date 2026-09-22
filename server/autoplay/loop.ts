@@ -1,11 +1,11 @@
 import * as db from '../db';
-import { logStateTransition } from '../db';
 import { spawnAgent, isAgentRunning } from '../agents/spawner';
 import { runBatchReview, isReviewRunning } from '../agents/reviewer';
 import { syncIssues } from '../github/issues';
 import { broadcast } from '../ws/handler';
 import { shouldSkipForWork, detectEpic } from '../epics/detector';
 import { displaceForUrgent, startBatch } from '../state/machine';
+import { createWorktree } from '../worktrees/manager';
 import { findBatchableTickets, generateBatchName } from '../batching/area-detector';
 import type { Ticket } from '../state/types';
 
@@ -348,8 +348,9 @@ async function autoStartReadyTickets(): Promise<void> {
       continue;
     }
 
-    await startTicketInSlot(ticket, slot, 'urgent priority start');
-    availableSlots--;
+    if (await startTicketInSlot(ticket, slot, 'urgent priority start')) {
+      availableSlots--;
+    }
   }
 
   // Process normal tickets (only if slots available, no displacement)
@@ -371,55 +372,70 @@ async function autoStartReadyTickets(): Promise<void> {
 }
 
 /**
- * Helper to start a ticket in a specific slot
+ * Helper to start a ticket in a specific slot.
+ *
+ * Two ordering rules matter here:
+ *
+ * 1. The worktree is prepared BEFORE anything is written to the ticket. A slot
+ *    that cannot be made usable is an environment fault, not a failed attempt at
+ *    the work, so it must not spend the ticket's retry budget.
+ * 2. `ticket` was selected earlier in the cycle and may be stale by now — the
+ *    issue sync deletes tickets whose labels were removed. db.claimTicketForStart
+ *    re-reads and writes in one transaction, so a vanished or already-moved
+ *    ticket is skipped rather than half-started.
+ *
+ * Returns whether a slot was actually consumed.
  */
-async function startTicketInSlot(ticket: Ticket, slot: number, reason: string): Promise<void> {
-  console.log(`[autoplay] Auto-starting ticket #${ticket.github_issue_number} (priority: ${ticket.priority || 'medium'}) in slot ${slot}`);
+async function startTicketInSlot(ticket: Ticket, slot: number, reason: string): Promise<boolean> {
+  const branchName = ticket.branch_name || `claude/${ticket.github_issue_number}`;
 
-  // Log the state transition for debugging
-  const newAttemptCount = (ticket.attempt_count || 0) + 1;
-  logStateTransition(
-    ticket.id,
-    ticket.github_issue_number,
-    'attempt_count',
-    ticket.attempt_count || 0,
-    newAttemptCount,
-    'autoplay',
-    reason
-  );
+  try {
+    await createWorktree(slot, branchName);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`[autoplay] Slot ${slot} unusable for #${ticket.github_issue_number} — NOT counted as an attempt: ${detail}`);
+    db.updateTicket(ticket.id, {
+      needs_attention: 1,
+      attention_reason: `Worktree slot ${slot} could not be prepared: ${detail}`
+    });
+    broadcast({
+      type: 'ticket_updated',
+      ticketId: ticket.id,
+      changes: { needs_attention: true, attention_reason: `Worktree slot ${slot} could not be prepared: ${detail}` }
+    });
+    return false;
+  }
 
-  // Update ticket state
-  db.updateTicket(ticket.id, {
-    state: 'in_progress',
-    worktree_slot: slot,
-    attempt_count: newAttemptCount,
-    needs_attention: 0,
-    attention_reason: null
-  });
+  const claim = db.claimTicketForStart(ticket.id, slot, branchName, 'autoplay', reason);
+
+  if (!claim.ok) {
+    console.log(`[autoplay] Skipping #${ticket.github_issue_number} (${claim.reason}): ${claim.detail}`);
+    return false;
+  }
+
+  const started = claim.ticket;
+  console.log(`[autoplay] Auto-starting ticket #${started.github_issue_number} (priority: ${started.priority || 'medium'}) in slot ${slot}`);
 
   // Broadcast the update
   broadcast({
     type: 'ticket_updated',
-    ticketId: ticket.id,
+    ticketId: started.id,
     changes: {
       state: 'in_progress',
       worktree_slot: slot,
-      attempt_count: newAttemptCount,
+      attempt_count: claim.attemptCount,
       needs_attention: false,
       attention_reason: null
     }
   });
 
-  // Get the updated ticket and spawn agent
-  const updatedTicket = db.getTicketById(ticket.id);
-  if (updatedTicket) {
-    spawnAgent(updatedTicket).catch(error => {
-      console.error(`[autoplay] Failed to spawn agent for ticket ${ticket.id}:`, error);
-    });
-  }
+  spawnAgent(started).catch(error => {
+    console.error(`[autoplay] Failed to spawn agent for ticket ${started.id}:`, error);
+  });
 
   // Small delay between spawns to avoid overwhelming the system
   await new Promise(resolve => setTimeout(resolve, 1000));
+  return true;
 }
 
 /**

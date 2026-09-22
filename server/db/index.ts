@@ -990,9 +990,20 @@ export interface StateTransition {
   timestamp: string;
 }
 
+/** Count of audit rows this process failed to persist (see logStateTransition). */
+let droppedStateTransitions = 0;
+
+export function getDroppedStateTransitionCount(): number {
+  return droppedStateTransitions;
+}
+
 /**
  * Log a state transition for audit/debugging purposes.
  * Call this whenever attempt_count, state, or other key fields change.
+ *
+ * This is telemetry: it never throws into the caller, because failing to record
+ * an operation must not abort the operation itself. Failures are counted and
+ * logged at error level rather than swallowed.
  */
 export function logStateTransition(
   ticketId: number,
@@ -1003,21 +1014,104 @@ export function logStateTransition(
   source: TransitionSource,
   reason?: string
 ): void {
-  db.query(`
-    INSERT INTO state_transitions (ticket_id, github_issue_number, field, old_value, new_value, source, reason)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    ticketId,
-    issueNumber,
-    field,
-    oldValue?.toString() ?? null,
-    newValue?.toString() ?? null,
-    source,
-    reason ?? null
-  );
+  const description = `#${issueNumber}: ${field} ${oldValue}→${newValue} (source=${source}${reason ? `, reason=${reason}` : ''})`;
+
+  try {
+    db.query(`
+      INSERT INTO state_transitions (ticket_id, github_issue_number, field, old_value, new_value, source, reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      ticketId,
+      issueNumber,
+      field,
+      oldValue?.toString() ?? null,
+      newValue?.toString() ?? null,
+      source,
+      reason ?? null
+    );
+  } catch (error) {
+    droppedStateTransitions++;
+    console.error(
+      `[state-transition] DROPPED (total=${droppedStateTransitions}) ticket_id=${ticketId} ${description}`,
+      error
+    );
+    return;
+  }
 
   // Also log to console for immediate visibility
-  console.log(`[state-transition] #${issueNumber}: ${field} ${oldValue}→${newValue} (source=${source}${reason ? `, reason=${reason}` : ''})`);
+  console.log(`[state-transition] ${description}`);
+}
+
+export type StartClaimFailure = 'ticket_gone' | 'not_startable' | 'slot_taken';
+
+export type StartClaimResult =
+  | { ok: true; ticket: Ticket; attemptCount: number }
+  | { ok: false; reason: StartClaimFailure; detail: string };
+
+/**
+ * Re-validate a ticket and claim a worktree slot for it, atomically.
+ *
+ * Callers select candidate tickets and then cross await boundaries (displacement,
+ * spawn throttles) before starting them, while the issue sync concurrently deletes
+ * tickets whose labels were removed. Re-reading and writing inside one synchronous
+ * transaction means no other task can interleave, so a caller can never act on a
+ * ticket that has been deleted or moved since selection.
+ */
+export function claimTicketForStart(
+  ticketId: number,
+  slot: number,
+  branchName: string,
+  source: TransitionSource,
+  reason?: string
+): StartClaimResult {
+  const claim = db.transaction((): StartClaimResult => {
+    const current = getTicketById(ticketId);
+    if (!current) {
+      return { ok: false, reason: 'ticket_gone', detail: `ticket ${ticketId} no longer exists` };
+    }
+
+    if (current.state !== 'backlog') {
+      return { ok: false, reason: 'not_startable', detail: `state is "${current.state}", not "backlog"` };
+    }
+
+    if (current.paused) {
+      return { ok: false, reason: 'not_startable', detail: `paused${current.pause_reason ? ` (${current.pause_reason})` : ''}` };
+    }
+
+    const occupant = getTicketBySlot(slot);
+    if (occupant && occupant.id !== ticketId) {
+      return { ok: false, reason: 'slot_taken', detail: `slot ${slot} is held by #${occupant.github_issue_number}` };
+    }
+
+    const attemptCount = (current.attempt_count || 0) + 1;
+
+    const updated = updateTicket(ticketId, {
+      state: 'in_progress',
+      worktree_slot: slot,
+      branch_name: branchName,
+      attempt_count: attemptCount,
+      needs_attention: 0,
+      attention_reason: null
+    });
+
+    if (!updated) {
+      return { ok: false, reason: 'ticket_gone', detail: `ticket ${ticketId} vanished mid-claim` };
+    }
+
+    logStateTransition(
+      ticketId,
+      current.github_issue_number,
+      'attempt_count',
+      current.attempt_count || 0,
+      attemptCount,
+      source,
+      reason
+    );
+
+    return { ok: true, ticket: updated, attemptCount };
+  });
+
+  return claim();
 }
 
 /**
