@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS tickets (
   should_escalate_model INTEGER DEFAULT 0,
   -- Respawn tracking (prevent double-respawn on same commit)
   last_checked_sha TEXT,
+  -- Open review threads as of the last PR watch poll (router feature R3)
+  unresolved_thread_count INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );

@@ -1,5 +1,5 @@
 import { spawn } from 'bun';
-import { loadConfig } from '../config';
+import { loadConfig, ROUTER_MODE } from '../config';
 import * as db from '../db';
 import * as github from '../github/client';
 import { broadcast, broadcastTicketUpdated } from '../ws/handler';
@@ -105,8 +105,17 @@ export async function runBatchReview(
         continue; // Skip normal processing
       }
 
-      // If ready, minor_gaps, or needs_revision, move to Ready column
-      if (result.verdict === 'ready' || result.verdict === 'minor_gaps' || result.verdict === 'needs_revision') {
+      // needs_revision dispatched straight to implementation is exactly the bug
+      // dispatch-router-spec.md §2.4 fixes: 18 tickets carried that verdict and
+      // were worked anyway. In 'enforce', leave the claude-review label in place —
+      // the ticket stays in needs_review rather than being handed a claude-ready
+      // it hasn't earned. R6 (router.ts) is the readiness gate for everything that
+      // reaches claude-ready some other way. Off/shadow keep today's behaviour
+      // unchanged, so this PR changes no dispatch behaviour on merge.
+      const promoteNeedsRevision = result.verdict === 'needs_revision' && ROUTER_MODE !== 'enforce';
+
+      // If ready, minor_gaps, or a not-yet-enforced needs_revision, move to Ready column
+      if (result.verdict === 'ready' || result.verdict === 'minor_gaps' || promoteNeedsRevision) {
         // Remove claude-review label
         await github.removeLabelFromIssue(result.issueNumber, CLAUDE_REVIEW_LABEL);
         // Add claude-ready label
@@ -127,6 +136,8 @@ export async function runBatchReview(
           await github.addLabelToIssue(result.issueNumber, USE_SONNET_LABEL);
           console.log(`[review] Issue #${result.issueNumber} marked as simple -> ${USE_SONNET_LABEL}`);
         }
+      } else if (result.verdict === 'needs_revision') {
+        console.log(`[review] Issue #${result.issueNumber} needs_revision — leaving claude-review in place (router mode: ${ROUTER_MODE})`);
       }
 
       // If closed, close the issue

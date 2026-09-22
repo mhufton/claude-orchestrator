@@ -1,4 +1,5 @@
 import { dirname, join } from 'path';
+import type { RouterMode } from './state/types';
 
 // PRs target main; the dev branch was retired with the single-branch pipeline.
 export const BASE_BRANCH = process.env.BASE_BRANCH || 'main';
@@ -76,6 +77,17 @@ export const MODEL_ESCALATION_LADDER: readonly ('opus' | 'sonnet')[] = ['sonnet'
 // import.meta.dir is server/, so the repo root is one level up.
 export const DB_PATH: string =
   process.env.ORCHESTRATOR_DB || join(dirname(import.meta.dir), 'orchestrator.db');
+
+// Kill switch for the dispatch router (agents/router.ts). 'shadow' runs decide() and
+// records its output on every dispatch without changing what gets spawned — the diff
+// between shadow decisions and actual outcomes is the evidence 'enforce' needs before
+// it gates anything for real. Defaults to shadow, not off, so that evidence accrues
+// from the moment this ships.
+export const ROUTER_MODE: RouterMode = (() => {
+  const raw = process.env.ROUTER_MODE;
+  if (raw === 'off' || raw === 'shadow' || raw === 'enforce') return raw;
+  return 'shadow';
+})();
 
 // Absolute path required: Bun.spawn throws ENOENT rather than falling back to PATH,
 // and a dangling path fails silently (see the /opt/homebrew hardcode this replaces).

@@ -9,7 +9,9 @@ import { getRetryContext } from '../github/pr-watcher';
 import { diagnoseWorktree, isStuck, runRecovery, forceResetWorktree } from '../worktrees/recovery';
 import { tryAcquireRespawnLock } from './respawn-coordinator';
 import { ProgressTracker } from './progress-tracker';
-import { MAX_AUTO_ATTEMPTS, CLAUDE_BIN, MODEL_ESCALATION_LADDER } from '../config';
+import { MAX_AUTO_ATTEMPTS, CLAUDE_BIN, MODEL_ESCALATION_LADDER, ROUTER_MODE } from '../config';
+import { decide, currentRiskListSha } from './router';
+import { runRefinePhase } from './refiner';
 import type { Ticket } from '../state/types';
 
 // Path to orchestrator bin directory (for queue-run and other tools)
@@ -660,24 +662,41 @@ export async function spawnAgent(ticket: Ticket): Promise<AgentResult> {
     ticketContexts.delete(ticket.id);
   }
 
-  // Select model based on labels and attempt count
-  const model = selectModel(ticket);
   const headShaBefore = await getHeadSha(worktreePath);
 
-  // Dispatch recording: one row per spawn event. PR 1 records and decides
-  // nothing — rule is always 'STATIC' and mode is always 'off' until the
-  // router (PR 2) exists.
+  // decide() always runs and is always recorded — that is what makes shadow mode
+  // useful: it produces a diff between what the router would have done and what
+  // actually happened, on real tickets, before it gates anything. Only in 'enforce'
+  // does its output change what gets spawned below.
+  const history = db.getDispatchesForTicket(ticket.id);
+  const decision = await decide(ticket, history, worktreePath);
+  const riskListSha = await currentRiskListSha(worktreePath);
+
   const dispatch = db.insertDispatch({
     ticket_id: ticket.id,
     attempt_number: ticket.attempt_count,
-    phase: 'implement',
-    model,
-    rule: 'STATIC',
-    fallback: false,
-    mode: 'off',
-    features: '{}',
+    phase: decision.phase,
+    model: decision.model,
+    rule: decision.rule,
+    confidence: decision.confidence,
+    reason: decision.reason,
+    fallback: decision.fallback,
+    mode: ROUTER_MODE,
+    features: JSON.stringify(decision.features),
+    router_version: decision.routerVersion,
+    risk_list_sha: riskListSha,
     head_sha_before: headShaBefore,
   });
+
+  if (ROUTER_MODE === 'enforce' && decision.phase === 'refine') {
+    return await runRefinePhase(ticket, dispatch.id);
+  }
+
+  // Shadow/off: the spawn uses selectModel() exactly as today, so this PR changes
+  // no dispatch behaviour on merge. Enforce: trust the router's model, including
+  // for a 'respond' decision, which reuses this same implement flow at a pinned
+  // (non-escalating) model rather than a distinct execution path.
+  const model = ROUTER_MODE === 'enforce' ? decision.model : selectModel(ticket);
 
   // Record which model ran this attempt; joinable to tickets.current_score via ticket_id.
   db.insertLog(ticket.id, 'model_selected', model, model, ticket.attempt_count);
